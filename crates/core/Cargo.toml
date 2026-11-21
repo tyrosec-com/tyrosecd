@@ -1,0 +1,24 @@
+[package]
+name = "tyrosd-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+md-5.workspace = true
+blake3.workspace = true
+hex.workspace = true
+zstd.workspace = true
+diffy.workspace = true
+regex.workspace = true
+globset.workspace = true
+libc.workspace = true
+redb.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

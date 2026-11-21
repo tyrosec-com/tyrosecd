@@ -1,0 +1,39 @@
+# tyrosecd Agent – harte Grenzen: selbst ein fehlerhafter Agent bremst den Server nicht aus.
+[Unit]
+Description=tyrosecd Agent (Datei-, Login- und Metrik-Überwachung)
+After=network-online.target local-fs.target
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+# Rollback-Wächter: nach einem Selbst-Update 2 Fehlstarts → beim 3. Start alte Version zurück
+ExecStartPre=/bin/sh -c 'f=/var/lib/tyrosecd/update.json; c=/var/lib/tyrosecd/update.attempts; [ -f $$f ] || exit 0; n=$$(($$(cat $$c 2>/dev/null || echo 0)+1)); echo $$n > $$c; if [ $$n -gt 2 ] && [ -f /opt/tyrosecd/bin/tyrosecd.prev ]; then mv -f /opt/tyrosecd/bin/tyrosecd.prev /opt/tyrosecd/bin/tyrosecd; cp -f $$f /var/lib/tyrosecd/update.failed; rm -f $$f $$c; echo "tyrosecd: Update-Rollback"; fi'
+ExecStart=/opt/tyrosecd/bin/tyrosecd run --config /etc/tyrosecd/agent.toml
+Restart=on-failure
+RestartSec=5
+MemoryMax=256M
+MemoryHigh=128M
+CPUQuota=50%
+CPUWeight=20
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TasksMax=64
+LimitNOFILE=65536
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=/var/lib/tyrosecd /var/log/tyrosecd /etc/tyrosecd /opt/tyrosecd/bin /proc/sys/fs/inotify
+ProtectHome=read-only
+ProtectKernelModules=yes
+ProtectClock=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# CAP_NET_ADMIN nur lesend: Firewall-Regeln (nft/iptables) für das Inventar
+CapabilityBoundingSet=CAP_SYS_ADMIN CAP_DAC_READ_SEARCH CAP_DAC_OVERRIDE CAP_SYS_PTRACE CAP_SYS_RESOURCE CAP_AUDIT_READ CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

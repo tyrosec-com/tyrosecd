@@ -1,0 +1,18 @@
+[package]
+name = "tyrosd-yara"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+description = "YARA-Regelpaket laden und Dateien prüfen (boreal, reines Rust)"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+zstd.workspace = true
+# ohne „process“ (Prozessspeicher) und „memmap“; „object“ für die Module pe/elf, die Regeldateien importieren
+boreal = { version = "1.4", default-features = false, features = ["hash", "object"] }
+
+[dev-dependencies]
+tempfile.workspace = true

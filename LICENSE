@@ -1,0 +1,119 @@
+tyrosec Source Review License 1.0
+==================================
+
+Rechteinhaber: DAI-KOMIO e.K. (tyrosec), Ahrensfelde, Deutschland – Kontakt: info@tyrosec.com
+Software: tyrosecd (Agent) und alle Dateien in diesem Repository
+
+Maßgeblich ist die deutsche Fassung. Die englische Fassung unten dient nur dem Verständnis.
+
+1. Zweck
+--------
+Der Quellcode des tyrosec-Agenten wird veröffentlicht, damit Kunden und Interessierte prüfen können, was ein Programm
+mit weitreichenden Rechten auf ihren Servern tut, und damit sie nachvollziehen können, dass die offiziell
+veröffentlichten, signierten Programmdateien aus genau diesem Quellcode entstehen. Die Veröffentlichung ist keine
+Freigabe zur allgemeinen Nutzung. Diese Software ist keine Open-Source-Software.
+
+2. Erlaubt ohne gesonderte Zustimmung
+-------------------------------------
+2.1 Prüfen. Jede natürliche oder juristische Person – auch ein Unternehmen, etwa vor oder während eines Vertrags mit
+    tyrosec – darf die Software lesen, prüfen und analysieren, sie dafür durch beauftragte Dritte (z. B. Prüfer,
+    Auditoren) lesen, prüfen und analysieren lassen und sie übersetzen (bauen), um die so entstehenden Programmdateien
+    mit den offiziell veröffentlichten Programmdateien zu vergleichen. Dabei entstehende Programmdateien dürfen nur zu
+    diesem Vergleich verwendet und nicht betrieben werden. Gefundene Sicherheitslücken dürfen dem Rechteinhaber gemeldet
+    werden (siehe SECURITY.md).
+
+2.2 Private Nutzung. Eine natürliche Person darf die Software auf eigenen oder von ihr selbst gemieteten Geräten bzw.
+    Servern übersetzen, betreiben und für sich ändern – ausschließlich für Zwecke, die nicht im Zusammenhang mit einer
+    gewerblichen oder beruflichen Tätigkeit stehen.
+
+3. Nicht erlaubt ohne vorherige schriftliche Zustimmung des Rechteinhabers
+--------------------------------------------------------------------------
+Über Abschnitt 2 hinaus ist insbesondere nicht erlaubt:
+a) jede Weitergabe der Software oder daraus erstellter Programmdateien an Dritte, ob geändert oder unverändert, sowie
+   das öffentliche Zugänglichmachen geänderter Fassungen;
+b) jede Nutzung durch oder für Unternehmen, Selbstständige, Freiberufler, Vereine, Verbände, Behörden oder sonstige
+   Organisationen – auch für interne Zwecke –, soweit sie über das Prüfen nach Abschnitt 2.1 hinausgeht, insbesondere
+   das Betreiben selbst gebauter Programmdateien;
+c) jede Nutzung für Dritte, insbesondere die Überwachung oder Betreuung fremder Server, das Anbieten als Dienstleistung
+   oder als Teil eines Hosting-Angebots;
+d) die Übernahme der Software oder von Teilen davon in andere Software oder Produkte;
+e) die Verwendung der Software oder von Teilen davon zum Training oder zur Verbesserung von Modellen der künstlichen
+   Intelligenz. Der Rechteinhaber behält sich Vervielfältigungen für Text und Data Mining ausdrücklich vor
+   (Nutzungsvorbehalt nach § 44b Abs. 3 UrhG);
+f) das Entfernen oder Verändern von Urheber-, Lizenz- oder Markenhinweisen.
+
+4. Nutzung im Rahmen eines tyrosec-Vertrags
+------------------------------------------
+Kunden von tyrosec setzen den Agenten über die offiziell veröffentlichten, signierten Programmdateien ein. Dafür gelten
+die Allgemeinen Geschäftsbedingungen von tyrosec; diese Lizenz erweitert sie nicht.
+
+5. Gesetzliche Rechte
+---------------------
+Zwingende gesetzliche Befugnisse, insbesondere nach §§ 69d und 69e des Urheberrechtsgesetzes, bleiben unberührt.
+
+6. Marken
+---------
+Diese Lizenz gewährt keine Rechte an Namen, Logos oder Marken von tyrosec.
+
+7. Haftung
+----------
+Für die nach Abschnitt 2 erlaubten unentgeltlichen Nutzungen wird die Software ohne Gewähr bereitgestellt. Der
+Rechteinhaber haftet nur für Vorsatz und grobe Fahrlässigkeit sowie nach zwingenden gesetzlichen Vorschriften,
+insbesondere dem Produkthaftungsgesetz und bei Verletzung von Leben, Körper oder Gesundheit.
+
+8. Ende der Rechte
+------------------
+Wer gegen diese Lizenz verstößt, verliert die Rechte aus Abschnitt 2 mit sofortiger Wirkung.
+
+9. Schlussbestimmungen
+----------------------
+Es gilt das Recht der Bundesrepublik Deutschland unter Ausschluss des UN-Kaufrechts. Ist der Lizenznehmer Kaufmann,
+juristische Person des öffentlichen Rechts oder öffentlich-rechtliches Sondervermögen, ist Gerichtsstand der Sitz des
+Rechteinhabers. Sollte eine Bestimmung dieser Lizenz unwirksam sein, bleibt die Wirksamkeit der übrigen Bestimmungen
+unberührt.
+
+Anfragen zu weiteren Nutzungen: info@tyrosec.com
+
+
+-------------------------------------------------------------------------------------------------------------------------
+
+tyrosec Source Review License 1.0 – English convenience translation (the German version above is authoritative)
+
+Licensor: DAI-KOMIO e.K. (tyrosec), Ahrensfelde, Germany – info@tyrosec.com
+
+1. Purpose. The source code of the tyrosec agent is published so that customers and interested parties can review what
+   a program with far-reaching privileges does on their servers, and verify that the officially published, signed
+   binaries are built from exactly this source. Publication is not a grant of general use. This is not open-source
+   software.
+
+2. Permitted without separate consent.
+   2.1 Review. Any natural or legal person – including a company, e.g. before or during a contract with tyrosec – may
+       read, review and analyse the software, have it reviewed by commissioned third parties (e.g. auditors), and
+       compile it in order to compare the resulting binaries with the officially published binaries. Binaries built
+       this way may only be used for that comparison, not run. Security issues may be reported to the licensor (see
+       SECURITY.md).
+   2.2 Private use. A natural person may compile, run and modify the software on devices or servers they own or rent
+       themselves, solely for purposes unrelated to any commercial or professional activity.
+
+3. Beyond section 2, the following in particular requires the licensor's prior written consent: (a) any distribution
+   of the software or binaries built from it, modified or not, and making modified versions publicly available; (b) any
+   use by or for companies, self-employed persons, freelancers, associations, public authorities or other
+   organisations, including internal use, beyond review under section 2.1 – in particular running self-built binaries;
+   (c) any use on behalf of third parties, in particular monitoring or managing other people's servers, offering it as
+   a service or as part of a hosting offering; (d) incorporating the software or parts of it into other software or
+   products; (e) using the software or parts of it to train or improve artificial-intelligence models; the licensor
+   expressly reserves text and data mining (reservation under section 44b(3) of the German Copyright Act); (f) removing
+   or altering copyright, licence or trademark notices.
+
+4. Customers use the agent via the officially published, signed binaries under the tyrosec terms and conditions; this
+   licence does not extend them.
+5. Mandatory statutory rights, in particular under sections 69d and 69e of the German Copyright Act, remain unaffected.
+6. No rights to tyrosec names, logos or trademarks are granted.
+7. For the free uses permitted under section 2 the software is provided without warranty; liability is limited to
+   intent and gross negligence and to mandatory statutory liability.
+8. Any breach of this licence terminates the rights under section 2 with immediate effect.
+9. German law applies, excluding the UN Convention on Contracts for the International Sale of Goods. For merchants and
+   public-law entities the place of jurisdiction is the licensor's registered office. If any provision is invalid, the
+   remaining provisions remain unaffected.
+
+Requests for further use: info@tyrosec.com

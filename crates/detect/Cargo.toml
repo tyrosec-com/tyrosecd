@@ -1,0 +1,13 @@
+[package]
+name = "tyrosd-detect"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+libc.workspace = true
+serde.workspace = true
+regex.workspace = true
+tyrosd-proto.workspace = true
+tyrosd-core.workspace = true

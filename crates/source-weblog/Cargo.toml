@@ -1,0 +1,12 @@
+[package]
+name = "tyrosd-source-weblog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+regex.workspace = true
+serde_json.workspace = true
+tyrosd-proto.workspace = true
+tyrosd-source-auth.workspace = true

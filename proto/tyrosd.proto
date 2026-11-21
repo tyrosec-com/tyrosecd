@@ -1,0 +1,91 @@
+// tyrosd – Protokoll Agent ↔ Zentrale (Version 1)
+// Maßgeblich ist agent/crates/proto/src/lib.rs (prost-Strukturen); diese Datei
+// beschreibt dasselbe Schema für andere Sprachen und wird synchron gehalten.
+//
+// Transport: HTTPS, Body = Protobuf (Batch zusätzlich zstd, Header Content-Encoding: zstd)
+//   POST /v1/enroll     EnrollRequest → EnrollResponse   (ohne Client-Zertifikat, Einmal-Token)
+//   POST /v1/batch      Batch         → BatchAck         (mTLS, CN = Host-ID)
+//   POST /v1/heartbeat  Heartbeat     → HeartbeatAck     (mTLS)
+// Hash-Kette: Envelope.prev_hash = SHA-256 der kodierten Vorgänger-Envelope.
+syntax = "proto3";
+package tyrosd.v1;
+
+message EnrollRequest { string token = 1; string csr_pem = 2; HostInfo host = 3; uint32 protocol = 4; }
+message EnrollResponse { string host_id = 1; string cert_pem = 2; string server_ca_pem = 3; string tenant = 4; }
+message HostInfo { string hostname = 1; string os = 2; string kernel = 3; string arch = 4; string agent_version = 5; string backend = 6; }
+
+message Batch { uint32 protocol = 1; repeated bytes envelopes = 2; }   // kodierte Envelopes, exakt wie im Spool
+message BatchAck { uint64 acked_seq = 1; repeated string resync_paths = 2; bool chain_gap = 3; }
+
+message Envelope {
+  uint64 seq = 1;
+  bytes prev_hash = 2;
+  int64 ts_ns = 3;
+  oneof body {
+    FileEvent file = 10;
+    FileContent content = 11;
+    MetricBatch metrics = 12;
+    Lifecycle lifecycle = 13;
+    CheckReport check = 14;
+    LoginEvent login = 15;
+    InventoryReport inventory = 16;
+    Detection detection = 17;   // Erkennung im Agent (Reverse Shell, Webserver-Shell, Mining/Spam)
+    ActionResult action_result = 18;   // Ergebnis einer Aktion (restore, quarantine, block_ip, unblock_ip)
+  }
+}
+
+message FileMeta { uint64 size = 1; uint32 mode = 2; uint32 uid = 3; uint32 gid = 4; uint64 ino = 5; int64 mtime_ns = 6; int64 ctime_ns = 7; bytes caps = 8; }
+
+message FileEvent {
+  string op = 1;            // CREATE MODIFY DELETE RENAME ATTRIB WRITE_NOCHANGE OVERFLOW
+  string path = 2;
+  string old_path = 3;
+  string backend = 4;       // fanotify inotify scan
+  int64 first_ts_ns = 5;
+  int32 pid = 6; string exe = 7; string comm = 8; repeated string proc_chain = 9;
+  string mode = 10;         // full redacted hash meta
+  bytes base_hash = 11;     // Basis (gespeicherte Fassung), gegen die patch erzeugt wurde
+  bytes raw_hash = 12;      // SHA-256 des Rohinhalts
+  bytes stored_hash = 13;   // SHA-256 der gespeicherten (ggf. maskierten) Fassung
+  bytes patch_zstd = 14;    // unified diff (zstd)
+  bytes content_zstd = 15;  // voller Inhalt (zstd), wenn keine Basis
+  FileMeta meta = 16;
+  string note = 17;         // kommagetrennt: pkg, deploy:<label>, redacted, secret_value_changed, suid_sgid, …
+  uint32 diff_lines = 18;
+}
+message FileContent { string path = 1; bytes stored_hash = 2; bytes content_zstd = 3; bool missing = 4; }
+
+message MetricBatch { repeated MetricPoint points = 1; }
+message MetricPoint {
+  int64 ts_ns = 1; float cpu_pct_avg = 2; float cpu_pct_max = 3; float load1 = 4;
+  uint64 mem_total = 5; uint64 mem_used = 6; uint64 swap_total = 7; uint64 swap_used = 8;
+  uint64 net_rx_bps = 9; uint64 net_tx_bps = 10; repeated DiskUsage disks = 11; float steal_pct = 12; uint32 procs = 13;
+  // 14-17: PSI, Top-Prozesse; 18: Verkehr je Port
+  repeated PortTraffic ports = 18;
+}
+message DiskUsage { string mount = 1; uint64 total = 2; uint64 used = 3; uint64 inodes_total = 4; uint64 inodes_used = 5; }
+
+message Lifecycle { string kind = 1; HostInfo host = 2; string detail = 3; }   // start stop
+message CheckReport { bytes json_zstd = 1; }
+
+message LoginEvent {
+  string service = 1; bool success = 2; string user = 3; string ip = 4; uint32 port = 5;
+  string method = 6; string key_type = 7; string key_fp = 8; uint32 count = 9; bool invalid_user = 10; int64 first_ts_ns = 11;
+}
+
+message Heartbeat { uint64 last_seq = 1; uint64 spool_bytes = 2; uint64 spool_items = 3; string backend = 4; string agent_version = 5; uint64 uptime_s = 6; uint64 rss_kb = 7; repeated string actions = 8;
+  // YARA-Regelpaket (ab 0.5.0): geladene Version („r1“), Regeln, Speicher nach dem Laden, letzter Fehler beim Laden
+  string rules_version = 9; uint32 rules_count = 10; uint64 rules_rss_kb = 11; string rules_error = 12; }
+message HeartbeatAck { uint32 interval_s = 1; string update_version = 2; string update_base = 3; bool run_check = 4; repeated Action actions = 5;
+  // aktuelles YARA-Regelpaket und Basis-URL (get.tyrosec.com/rules/<version>) – leer: keins angeboten
+  string rules_version = 6; string rules_base = 7; }
+// Aktionen nur, wenn lokal freigeschaltet (tyrosecd actions enable)
+message Action { uint64 id = 1; string kind = 2; string path = 3; string ip = 4; uint32 duration_s = 5; bytes content_zstd = 6; bytes content_hash = 7; uint32 mode = 8; string params = 9; }   // params: JSON (Köder: Werte, nie Datei-Inhalt)
+message ActionResult { uint64 id = 1; bool ok = 2; string message = 3; }
+message PortTraffic { uint32 port = 1; string dir = 2; uint64 rx_bytes = 3; uint64 tx_bytes = 4; uint32 conns = 5; }
+message InventoryReport { bytes json_zstd = 1; }   // JSON: services, processes, listeners, firewall
+
+// Ergänzungen 2026-11-15 (Stufe C)
+// MetricPoint: float psi_cpu = 14; float psi_mem = 15; float psi_io = 16; repeated TopProc top = 17;
+message TopProc { string comm = 1; float cpu_pct = 2; uint64 rss_kb = 3; uint32 pid = 4; }
+message Detection { string rule = 1; string severity = 2; string title = 3; string detail = 4; uint32 pid = 5; string exe = 6; repeated string proc_chain = 7; string key = 8; }
