@@ -272,6 +272,47 @@ fn service_private_tmp(p: &str) -> bool {
     }) && p.contains(".service-") && p.split(".service-").nth(1).is_some_and(|r| r.contains("/tmp/"))
 }
 
+#[derive(Debug, PartialEq)]
+enum HiddenDir {
+    Empty,
+    Browser(u32),
+    Suspicious,
+}
+
+/// Hidden directory in a temporary folder: empty (leftover, nothing to hide) or a temporary profile of a headless
+/// browser (Chromium/Chrome/Firefox, e.g. PDF rendering of a web app) owned by a non-root user without any
+/// program inside – real case: /tmp/.org.chromium.Chromium.XXXXXX of www-data, empty.
+/// Everything else (or a directory that cannot be read completely) stays suspicious.
+fn hidden_tmp_dir_kind(dir: &std::path::Path, name: &str) -> HiddenDir {
+    let Ok(mut rd) = std::fs::read_dir(dir) else { return HiddenDir::Suspicious };
+    if rd.next().is_none() {
+        return HiddenDir::Empty;
+    }
+    const BROWSER: [&str; 4] = [".org.chromium.Chromium.", ".com.google.Chrome.", ".org.mozilla.", ".mozilla-temp-"];
+    let Ok(meta) = std::fs::symlink_metadata(dir) else { return HiddenDir::Suspicious };
+    if meta.uid() == 0 || !BROWSER.iter().any(|b| name.starts_with(b)) {
+        return HiddenDir::Suspicious;
+    }
+    let mut seen = 0;
+    for e in walkdir::WalkDir::new(dir).max_depth(6).follow_links(false) {
+        let Ok(e) = e else { return HiddenDir::Suspicious };
+        seen += 1;
+        if seen > 2000 {
+            return HiddenDir::Suspicious; // too large to judge quickly
+        }
+        if !e.file_type().is_file() {
+            continue;
+        }
+        let Ok(m) = e.metadata() else { return HiddenDir::Suspicious };
+        let mut head = [0u8; 4];
+        let elf = std::fs::File::open(e.path()).and_then(|mut f| std::io::Read::read_exact(&mut f, &mut head)).is_ok() && &head == b"\x7fELF";
+        if elf || m.mode() & 0o111 != 0 || m.uid() == 0 {
+            return HiddenDir::Suspicious;
+        }
+    }
+    HiddenDir::Browser(meta.uid())
+}
+
 fn tmp_exec(ctx: &mut Ctx) {
     let mut n_copies = 0u64;
     let mut mapped: Option<std::collections::HashMap<u64, (i32, String, u32)>> = None;
@@ -281,7 +322,13 @@ fn tmp_exec(ctx: &mut Ctx) {
             let p = e.path().to_string_lossy().into_owned();
             let name = e.file_name().to_string_lossy().into_owned();
             if e.depth() == 1 && e.file_type().is_dir() && name.starts_with('.') && !matches!(name.as_str(), ".X11-unix" | ".ICE-unix" | ".font-unix" | ".XIM-unix" | ".Test-unix") {
-                ctx.add(Severity::Medium, Category::Runtime, "tmp_hidden_dir", "Hidden directory in a temporary folder", Some(p.clone()), None);
+                match hidden_tmp_dir_kind(e.path(), &name) {
+                    HiddenDir::Empty => ctx.add(Severity::Info, Category::Runtime, "tmp_hidden_dir", "Hidden directory in a temporary folder", Some(p.clone()),
+                        Some("empty – nothing inside".into())),
+                    HiddenDir::Browser(uid) => ctx.add(Severity::Info, Category::Runtime, "tmp_hidden_dir", "Hidden directory in a temporary folder", Some(p.clone()),
+                        Some(format!("temporary profile of a headless browser (user ID {uid}), no programs inside"))),
+                    HiddenDir::Suspicious => ctx.add(Severity::Medium, Category::Runtime, "tmp_hidden_dir", "Hidden directory in a temporary folder", Some(p.clone()), None),
+                }
             }
             if !e.file_type().is_file() {
                 continue;
@@ -609,6 +656,47 @@ mod tests {
         f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600)).unwrap();
         assert!(pkg_manager_busy(&root).is_none(), "old update");
         std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn hidden_tmp_dirs_empty_or_browser_profile_are_harmless() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("thid-{}", std::process::id()));
+        let empty = root.join(".org.chromium.Chromium.9cldHL");
+        let other_empty = root.join(".x");
+        let evil = root.join(".x2");
+        let chrome = root.join(".org.chromium.Chromium.abc123");
+        for d in [&empty, &other_empty, &evil, &chrome] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        std::fs::write(evil.join("kworker"), "\x7fELF....").unwrap();
+        std::fs::create_dir_all(chrome.join("Default")).unwrap();
+        std::fs::write(chrome.join("Default/Preferences"), "{}").unwrap();
+        assert_eq!(hidden_tmp_dir_kind(&empty, ".org.chromium.Chromium.9cldHL"), HiddenDir::Empty);
+        assert_eq!(hidden_tmp_dir_kind(&other_empty, ".x"), HiddenDir::Empty);
+        assert_eq!(hidden_tmp_dir_kind(&evil, ".x2"), HiddenDir::Suspicious);
+        let me = std::fs::symlink_metadata(&chrome).unwrap().uid();
+        if me == 0 {
+            // as root: owned by root → suspicious; then hand it to www-data (uid 33)
+            assert_eq!(hidden_tmp_dir_kind(&chrome, ".org.chromium.Chromium.abc123"), HiddenDir::Suspicious);
+            for p in [chrome.clone(), chrome.join("Default"), chrome.join("Default/Preferences")] {
+                std::os::unix::fs::chown(&p, Some(33), Some(33)).unwrap();
+            }
+        }
+        let uid = std::fs::symlink_metadata(&chrome).unwrap().uid();
+        assert_eq!(hidden_tmp_dir_kind(&chrome, ".org.chromium.Chromium.abc123"), HiddenDir::Browser(uid));
+        // a program inside the browser profile → suspicious again
+        let exe = chrome.join("Default/run");
+        std::fs::write(&exe, "#!/bin/sh").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if me == 0 {
+            std::os::unix::fs::chown(&exe, Some(33), Some(33)).unwrap();
+        }
+        assert_eq!(hidden_tmp_dir_kind(&chrome, ".org.chromium.Chromium.abc123"), HiddenDir::Suspicious);
+        // same name pattern but not a browser prefix with content → suspicious
+        std::fs::remove_file(&exe).unwrap();
+        assert_eq!(hidden_tmp_dir_kind(&chrome, ".chromium-fake"), HiddenDir::Suspicious);
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]

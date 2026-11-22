@@ -3,6 +3,12 @@
 Each version listed here corresponds exactly to the Git tag `v<version>` and to the signed binary under
 `https://get.tyrosec.com/releases/<version>/` (rebuild: [VERIFY.md](VERIFY.md)).
 
+## 0.5.9
+
+- Compromise check: a hidden directory in a temporary folder that is empty, or that is the temporary profile of a
+  headless browser (Chromium, Chrome, Firefox) owned by a regular user without any program inside, is reported as
+  information only instead of a finding of medium severity. Hidden directories containing programs stay findings.
+
 ## 0.5.8
 
 - Hardening after external security reviews:
