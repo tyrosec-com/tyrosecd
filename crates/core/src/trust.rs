@@ -1,38 +1,39 @@
-//! Gemeinsamer „bekannt-harmlos“-Kontext für alle Prozess- und Befehlsregeln (Plan Fehlalarm-Früherkennung, F1).
-//! Statt eigener Ausnahmelisten je Regel fragen Erkennung (detect) und Check dieselben Funktionen –
-//! so löst eine legitime Software (Paketverwaltung, eingehängtes AppImage) nicht nacheinander mehrere Regeln aus.
+//! Shared "known benign" context for all process and command rules (false-positive early detection plan, F1).
+//! Instead of separate exception lists per rule, detection (detect) and check ask the same functions –
+//! so legitimate software (package management, a mounted AppImage) does not trigger several rules one after another.
 //!
-//! Sicherheitsprüfung H4: Vertrauen gibt es nie über den Namen allein (`comm` setzt jeder Prozess selbst, ein
-//! Symlink `/tmp/dpkg → /bin/bash` heißt „dpkg“). Ein Paketverwaltungs-Prozess gilt nur, wenn
-//! - der Name **exakt** in der Liste steht (comm ist auf 15 Zeichen gekürzt: „unattended-upgr“, „update-initramf“),
-//! - der Prozess als root läuft,
-//! - `/proc/<pid>/exe` eine root-eigene, nicht für Gruppe/Andere schreibbare Datei unter /usr/bin, /usr/sbin,
-//!   /bin, /sbin, /usr/lib, /usr/libexec oder /usr/share ist,
-//! - und der Programmname zur Datei passt – bei Skripten (dracut, update-initramfs, unattended-upgrade …) ist
-//!   `exe` der Interpreter; dann muss das Skript (erstes Argument) selbst eine solche Systemdatei mit passendem
-//!   Namen sein.
+//! Security review H4: trust is never granted by name alone (every process sets `comm` itself, a
+//! symlink `/tmp/dpkg → /bin/bash` is called "dpkg"). A package management process only counts if
+//! - the name is **exactly** in the list (comm is truncated to 15 characters: "unattended-upgr", "update-initramf"),
+//! - the process runs as root,
+//! - `/proc/<pid>/exe` is a root-owned file, not writable by group/others, under /usr/bin, /usr/sbin,
+//!   /bin, /sbin, /usr/lib, /usr/libexec or /usr/share,
+//! - and the program name matches the file – for scripts (dracut, update-initramfs, unattended-upgrade …)
+//!   `exe` is the interpreter; then the script (first argument) must itself be such a system file with a matching
+//!   name.
 
 use std::os::unix::fs::MetadataExt;
 
-/// Paketverwaltung/Installer: was sie starten, ist Teil eines Updates (z. B. apt-key → base64 -d).
-/// Exakte comm-Namen (max. 15 Zeichen). Der Agent selbst steht bewusst nicht mehr hier – für ihn gilt `own_descendant`.
+/// Package management/installers: whatever they start is part of an update (e.g. apt-key → base64 -d).
+/// Exact comm names (max. 15 characters). The agent itself is deliberately no longer listed here – `own_descendant`
+/// applies to it.
 pub const INSTALLERS: &[&str] = &["dpkg", "apt", "apt-get", "apt-key", "unattended-upgr", "rpm", "dnf", "dnf5", "yum", "snapd", "packagekitd", "needrestart", "apt-check", "update-notifier",
     "update-initramf", "mkinitramfs", "dracut", "dracut-install", "mkdumprd", "kdumpctl", "mkinitcpio", "dpkg-trigger", "dpkg-deb", "dpkg-preconfigu", "debconf", "zypper", "apk", "pacman"];
 
-/// Paketmanager im engeren Sinn (Dateiänderungen gelten als Paket-Update, Notiz „pkg“)
+/// Package managers in the narrow sense (file changes count as a package update, note "pkg")
 pub const PACKAGE_MANAGERS: &[&str] =
     &["dpkg", "apt", "apt-get", "unattended-upgr", "rpm", "dnf", "dnf5", "yum", "apk", "pacman", "zypper", "packagekitd",
-      // Initramfs-Bau (Kernel-Updates, kdump beim Start; Testlauf auf Rocky 9): schreibt Kopien von Systemprogrammen nach /var/tmp
+      // initramfs build (kernel updates, kdump at boot; test run on Rocky 9): writes copies of system programs to /var/tmp
       "dracut", "dracut-install", "mkdumprd", "kdumpctl", "mkinitramfs", "update-initramf", "mkinitcpio"];
 
-/// Ordner, aus denen vertrauenswürdige Paketprogramme stammen
+/// Directories trusted package programs come from
 const TRUSTED_DIRS: &[&str] = &["/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/", "/usr/lib/", "/usr/libexec/", "/usr/share/"];
 
 fn base(p: &str) -> &str {
     p.rsplit('/').next().unwrap_or(p)
 }
 
-/// comm (max. 15 Zeichen) passt zum Dateinamen
+/// comm (max. 15 characters) matches the file name
 fn comm_matches(comm: &str, file: &str) -> bool {
     let b = base(file).as_bytes();
     comm.as_bytes() == b || (b.len() > 15 && comm.as_bytes() == &b[..15])
@@ -43,7 +44,7 @@ fn is_interpreter(file: &str) -> bool {
     matches!(b, "sh" | "bash" | "dash") || b.starts_with("python") || b.starts_with("perl")
 }
 
-/// Root-eigene, reguläre, nicht für Gruppe/Andere schreibbare Datei in einem Systemordner (Pfad ohne Symlinks)
+/// Root-owned regular file, not writable by group/others, in a system directory (path without symlinks)
 pub fn trusted_file(path: &str) -> bool {
     if path.ends_with(" (deleted)") || path.contains("/../") || path.contains("/./") || !TRUSTED_DIRS.iter().any(|d| path.starts_with(d)) {
         return false;
@@ -51,38 +52,38 @@ pub fn trusted_file(path: &str) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|m| m.is_file() && m.uid() == 0 && m.mode() & 0o022 == 0)
 }
 
-/// effektive UID eines Prozesses (aus /proc/<pid>/status)
+/// effective UID of a process (from /proc/<pid>/status)
 pub fn proc_euid(pid: i32) -> Option<u32> {
     let s = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
     s.lines().find_map(|l| l.strip_prefix("Uid:")).and_then(|l| l.split_whitespace().nth(1)).and_then(|u| u.parse().ok())
 }
 
-/// Umgebungsvariablen, über die fremder Code in ein (an sich geprüftes) Programm gelangt – Bibliotheken vorladen,
-/// Suchpfade für Module/Bibliotheken, Start-Optionen der Interpreter, Start-Skripte der Shell
-/// (`LD_PRELOAD=/tmp/x.so dpkg …` hätte sonst als Paketverwaltung gegolten).
-/// Variablen mit **Code** als Inhalt (Interpreter-Optionen, Start-Skripte, Shell-Optionen): nicht leer → kein Vertrauen
+/// Environment variables through which foreign code gets into an (otherwise verified) program – preloading libraries,
+/// search paths for modules/libraries, interpreter startup options, shell startup scripts
+/// (`LD_PRELOAD=/tmp/x.so dpkg …` would otherwise have counted as package management).
+/// Variables whose content is **code** (interpreter options, startup scripts, shell options): non-empty → no trust
 const CODE_ENV: &[&str] = &["PYTHONSTARTUP", "PYTHONINSPECT", "PERL5OPT", "PERL5DB", "RUBYOPT", "NODE_OPTIONS", "BASH_ENV", "ENV", "SHELLOPTS", "BASHOPTS"];
 
-/// Variablen mit **Pfadlisten** (Suchpfade, vorgeladene Bibliotheken): unbedenklich, wenn jeder Eintrag ein absoluter,
-/// existierender Pfad ist, der samt aller Elternordner root gehört und nicht für Gruppe/Andere schreibbar ist
-/// (z. B. Oracle-Client mit `LD_LIBRARY_PATH=/usr/lib/oracle/…` in /etc/environment – sonst Fehlalarme bei jedem
-/// Update). (Name, Trennzeichen) – LD_PRELOAD/LD_AUDIT trennt ld.so auch mit Leerzeichen.
+/// Variables with **path lists** (search paths, preloaded libraries): harmless if every entry is an absolute,
+/// existing path that, including all parent directories, is owned by root and not writable by group/others
+/// (e.g. an Oracle client with `LD_LIBRARY_PATH=/usr/lib/oracle/…` in /etc/environment – otherwise false alarms on
+/// every update). (name, separators) – ld.so also splits LD_PRELOAD/LD_AUDIT on spaces.
 const PATH_ENV: &[(&str, &[char])] = &[
     ("LD_PRELOAD", &[':', ' ']), ("LD_AUDIT", &[':', ' ']), ("LD_LIBRARY_PATH", &[':']), ("GCONV_PATH", &[':']), ("PYTHONPATH", &[':']),
     ("PYTHONHOME", &[':']), ("PERL5LIB", &[':']), ("PERLLIB", &[':']), ("RUBYLIB", &[':']), ("NODE_PATH", &[':']),
 ];
 
-/// Pfad und alle Elternordner bis / gehören root; Ordner/Dateien nicht für Gruppe/Andere schreibbar
-/// (Symlinks: nur Eigentümer – ihre Rechte sind bedeutungslos)
+/// Path and all parent directories up to / are owned by root; directories/files not writable by group/others
+/// (symlinks: owner only – their permissions are meaningless)
 fn root_chain(p: &std::path::Path) -> bool {
     p.ancestors().all(|a| {
         std::fs::symlink_metadata(a).is_ok_and(|m| m.uid() == 0 && (m.file_type().is_symlink() || m.mode() & 0o022 == 0))
     })
 }
 
-/// Eintrag einer Pfadliste ist unbedenklich: absolut, existiert, der angegebene Pfad (ohne Folgen) und das aufgelöste
-/// Ziel liegen jeweils samt Elternordnern in root-eigenen, nicht fremd beschreibbaren Ordnern.
-/// Leer (= aktuelles Verzeichnis) oder relativ → nicht unbedenklich.
+/// A path list entry is harmless: absolute, exists, and both the given path (not followed) and the resolved
+/// target, including their parent directories, lie in root-owned directories not writable by others.
+/// Empty (= current directory) or relative → not harmless.
 pub fn safe_path_entry(e: &str) -> bool {
     if !e.starts_with('/') || e.split('/').any(|c| c == "..") {
         return false;
@@ -92,8 +93,8 @@ pub fn safe_path_entry(e: &str) -> bool {
     root_chain(p) && root_chain(&real)
 }
 
-/// Erste bedenkliche Variable in einer Umgebung (`/proc/<pid>/environ`, NUL-getrennt) – leere Werte zählen nicht.
-/// Exportierte Bash-Funktionen (`BASH_FUNC_name%%`) überschreiben Befehle in Skripten und zählen immer.
+/// First suspicious variable in an environment (`/proc/<pid>/environ`, NUL-separated) – empty values do not count.
+/// Exported bash functions (`BASH_FUNC_name%%`) override commands in scripts and always count.
 pub fn unsafe_env(environ: &[u8]) -> Option<String> {
     unsafe_env_with(environ, &safe_path_entry)
 }
@@ -110,7 +111,7 @@ fn unsafe_env_with(environ: &[u8], path_ok: &dyn Fn(&str) -> bool) -> Option<Str
         } else if CODE_ENV.contains(&k.as_ref()) {
             true
         } else if let Some((_, seps)) = PATH_ENV.iter().find(|(n, _)| *n == k) {
-            // jeder Eintrag muss unbedenklich sein; leere Einträge („a::b“, „:a“) = aktuelles Verzeichnis
+            // every entry must be harmless; empty entries ("a::b", ":a") = current directory
             match std::str::from_utf8(v) {
                 Ok(s) => s.split(|c| seps.contains(&c)).any(|e| !path_ok(e)),
                 Err(_) => true,
@@ -122,7 +123,7 @@ fn unsafe_env_with(environ: &[u8], path_ok: &dyn Fn(&str) -> bool) -> Option<Str
     })
 }
 
-/// Shebang-Zeile `#!/pfad [argument]` → (Interpreter, optionales Argument, wie es der Kernel übergibt: Rest der Zeile)
+/// Shebang line `#!/path [argument]` → (interpreter, optional argument as the kernel passes it: rest of the line)
 fn parse_shebang(line: &str) -> Option<(String, Option<String>)> {
     let rest = line.strip_prefix("#!")?.trim_matches(|c: char| c == ' ' || c == '\t' || c == '\r');
     let (interp, arg) = match rest.find([' ', '\t']) {
@@ -132,11 +133,11 @@ fn parse_shebang(line: &str) -> Option<(String, Option<String>)> {
     (!interp.is_empty()).then(|| (interp.to_string(), arg))
 }
 
-/// Index des Skripts in der Befehlszeile eines Interpreters – **nur in Shebang-Form**:
-/// `[interp, skript, …]` oder `[interp, <genau das Argument aus der Shebang-Zeile des Skripts>, skript, …]`.
-/// Damit zählen `python3 -c …`, `python3 -mmodul skript`, `perl -e …`, `sh -c …` nie als das Skript.
-/// `first_line(arg)` liefert die erste Zeile der Datei (oder None), `canon(pfad)` den aufgelösten Pfad.
-/// Der Interpreter der Shebang-Zeile muss das laufende Programm `exe` sein (`/usr/bin/env name` → `name*`).
+/// Index of the script in an interpreter's command line – **only in shebang form**:
+/// `[interp, script, …]` or `[interp, <exactly the argument from the script's shebang line>, script, …]`.
+/// This way `python3 -c …`, `python3 -mmodule script`, `perl -e …`, `sh -c …` never count as the script.
+/// `first_line(arg)` returns the file's first line (or None), `canon(path)` the resolved path.
+/// The shebang line's interpreter must be the running program `exe` (`/usr/bin/env name` → `name*`).
 fn shebang_index(args: &[String], exe: &str, first_line: &dyn Fn(&str) -> Option<String>, canon: &dyn Fn(&str) -> Option<String>) -> Option<usize> {
     let (idx, flag) = match args.get(1) {
         Some(a) if !a.is_empty() && !a.starts_with('-') => (1, None),
@@ -146,8 +147,8 @@ fn shebang_index(args: &[String], exe: &str, first_line: &dyn Fn(&str) -> Option
     let (interp, sarg) = parse_shebang(&first_line(&args[idx])?)?;
     let via_env = base(&interp) == "env";
     if let Some(f) = flag {
-        // Option vor dem Skript nur, wenn sie wörtlich aus der Shebang-Zeile stammt (nicht bei env: dort ist das
-        // Argument der Programmname)
+        // an option before the script only if it comes verbatim from the shebang line (not with env: there the
+        // argument is the program name)
         if via_env || sarg.as_deref() != Some(f) {
             return None;
         }
@@ -160,7 +161,7 @@ fn shebang_index(args: &[String], exe: &str, first_line: &dyn Fn(&str) -> Option
     matches.then_some(idx)
 }
 
-/// Ist `pid` mit dem Namen `comm` wirklich ein Paketprogramm des Systems? (siehe Modulbeschreibung)
+/// Is `pid` with the name `comm` really a package program of the system? (see module description)
 pub fn verified_program(pid: i32, comm: &str) -> bool {
     if proc_euid(pid) != Some(0) {
         return false;
@@ -170,12 +171,12 @@ pub fn verified_program(pid: i32, comm: &str) -> bool {
     if !trusted_file(&exe) {
         return false;
     }
-    // die tatsächlich ausgeführte Datei (nicht nur der Name dahinter) muss ebenfalls root gehören
+    // the file actually executed (not just the name behind it) must also be owned by root
     if !std::fs::metadata(format!("/proc/{pid}/exe")).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o022 == 0) {
         return false;
     }
-    // keine vorgeladenen Bibliotheken, fremden Modulpfade oder Interpreter-Optionen aus der Umgebung
-    // (nicht lesbar → kein Vertrauen)
+    // no preloaded libraries, foreign module paths or interpreter options from the environment
+    // (not readable → no trust)
     match std::fs::read(format!("/proc/{pid}/environ")) {
         Ok(env) if unsafe_env(&env).is_none() => {}
         _ => return false,
@@ -186,7 +187,7 @@ pub fn verified_program(pid: i32, comm: &str) -> bool {
     if !is_interpreter(&exe) {
         return false;
     }
-    // Skript in Shebang-Form: das Skript selbst muss eine Systemdatei mit passendem Namen sein
+    // script in shebang form: the script itself must be a system file with a matching name
     let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else { return false };
     let args: Vec<String> = cmdline.split(|b| *b == 0).map(|a| String::from_utf8_lossy(a).into_owned()).collect();
     let resolve = |a: &str| -> Option<String> {
@@ -209,7 +210,7 @@ pub fn verified_program(pid: i32, comm: &str) -> bool {
     trusted_file(&real) && comm_matches(comm, &real)
 }
 
-/// Prozess oder ein Vorfahre (bis `depth`) ist ein geprüftes Programm aus `names`
+/// The process or an ancestor (up to `depth`) is a verified program from `names`
 pub fn verified_ancestor(pid: i32, depth: usize, names: &[&str]) -> bool {
     let mut cur = pid;
     for _ in 0..depth {
@@ -225,12 +226,12 @@ pub fn verified_ancestor(pid: i32, depth: usize, names: &[&str]) -> bool {
     false
 }
 
-/// Läuft der Prozess unter einer (geprüften) Paketverwaltung?
+/// Does the process run under (verified) package management?
 pub fn installer_ancestor(pid: i32, depth: usize) -> bool {
     verified_ancestor(pid, depth, INSTALLERS)
 }
 
-/// Prozess ist der Agent selbst oder von ihm gestartet (nft, journalctl, dpkg --verify …)
+/// The process is the agent itself or was started by it (nft, journalctl, dpkg --verify …)
 pub fn own_descendant(pid: i32, depth: usize) -> bool {
     let me = std::process::id() as i32;
     let mut cur = pid;
@@ -246,18 +247,18 @@ pub fn own_descendant(pid: i32, depth: usize) -> bool {
     false
 }
 
-/// Einhängepunkt eines AppImages zum Pfad (`/tmp/.mount_XXXX`), falls der Pfad darin liegt
+/// Mount point of an AppImage for the path (`/tmp/.mount_XXXX`), if the path lies inside it
 fn appimage_root(path: &str) -> Option<&str> {
     let rest = path.strip_prefix("/tmp/.mount_")?;
     let end = rest.find('/').map(|i| i + "/tmp/.mount_".len()).unwrap_or(path.len());
     Some(&path[..end])
 }
 
-/// Pfad liegt in einem wirklich eingehängten AppImage (FUSE-Mount unter /tmp/.mount_*).
-/// Nur der Name genügt nicht – ein Angreifer könnte den Ordner sonst einfach so nennen. Zusätzlich muss der Mount
-/// root gehören oder demselben Benutzer wie der Prozess (`proc_uid`; ohne bekannten Prozess nur root-Mounts).
-/// Dienstkonten sind zugelassen (Collabora in Nextcloud läuft als www-data) – wer www-data-Rechte hat, kann ohnehin
-/// direkt aus dem Webroot starten; eine Netzwerk-/Mining-Ausnahme gibt es für AppImages nicht.
+/// The path lies in a really mounted AppImage (FUSE mount under /tmp/.mount_*).
+/// The name alone is not enough – otherwise an attacker could simply name a directory that way. In addition the mount
+/// must be owned by root or by the same user as the process (`proc_uid`; without a known process only root mounts).
+/// Service accounts are allowed (Collabora in Nextcloud runs as www-data) – anyone with www-data rights can start
+/// directly from the webroot anyway; there is no network/mining exception for AppImages.
 pub fn appimage_with(path: &str, mounts: &str, proc_uid: Option<u32>) -> bool {
     let Some(root) = appimage_root(path) else { return false };
     mounts.lines().any(|l| {
@@ -275,7 +276,7 @@ pub fn appimage_with(path: &str, mounts: &str, proc_uid: Option<u32>) -> bool {
     })
 }
 
-/// Eingehängtes AppImage, Benutzer des Prozesses `pid` (falls bekannt) passt zum Mount
+/// Mounted AppImage; the user of process `pid` (if known) matches the mount
 pub fn appimage_for(path: &str, pid: Option<i32>) -> bool {
     if !path.starts_with("/tmp/.mount_") {
         return false;
@@ -284,14 +285,14 @@ pub fn appimage_for(path: &str, pid: Option<i32>) -> bool {
     appimage_with(path, &mounts_of(pid), uid)
 }
 
-/// Mounts aus Sicht des Prozesses: Dienste mit PrivateTmp (z. B. Apache → Collabora) haben einen eigenen
-/// Mount-Namensraum; ihr AppImage-Mount steht nicht in /proc/mounts des Agenten (Praxisfall auf einem Server).
+/// Mounts as seen by the process: services with PrivateTmp (e.g. Apache → Collabora) have their own
+/// mount namespace; their AppImage mount is not in the agent's /proc/mounts (real case on a server).
 fn mounts_of(pid: Option<i32>) -> String {
     pid.and_then(|p| std::fs::read_to_string(format!("/proc/{p}/mounts")).ok())
         .unwrap_or_else(|| std::fs::read_to_string("/proc/mounts").unwrap_or_default())
 }
 
-/// Befehlszeile ohne Pfade eingehängter AppImages (damit Muster wie „/tmp/.x“ sie nicht treffen)
+/// Command line without paths of mounted AppImages (so patterns like "/tmp/.x" do not match them)
 pub fn strip_appimages(cmdline: &str, pid: Option<i32>) -> String {
     if !cmdline.contains("/tmp/.mount_") {
         return cmdline.to_string();
@@ -318,11 +319,11 @@ pub fn strip_appimages_with(cmdline: &str, mounts: &str, proc_uid: Option<u32>) 
     out
 }
 
-/// Grund, warum ein Prozess als bekannt-harmlos gilt – oder None. Nur Paketverwaltung (geprüft über das Programm);
-/// AppImages bewusst nicht – für Netzwerk-/Mining-Regeln gibt es keine AppImage-Ausnahme.
+/// Reason why a process counts as known benign – or None. Only package management (verified via the program);
+/// deliberately not AppImages – there is no AppImage exception for network/mining rules.
 pub fn benign(pid: i32) -> Option<&'static str> {
     if installer_ancestor(pid, 16) {
-        return Some("läuft unter der Paketverwaltung");
+        return Some("runs under package management");
     }
     None
 }
@@ -337,20 +338,20 @@ mod tests {
     #[test]
     fn appimage_needs_real_fuse_mount() {
         assert!(appimage_with("/tmp/.mount_CollabjIprLa/usr/bin/coolwsd", MOUNTS, None));
-        assert!(!appimage_with("/tmp/.mount_Fake123/usr/bin/x", MOUNTS, None)); // nur der Name → verdächtig bleibt verdächtig
+        assert!(!appimage_with("/tmp/.mount_Fake123/usr/bin/x", MOUNTS, None)); // only the name → suspicious stays suspicious
         assert!(!appimage_with("/tmp/.x/kworker", MOUNTS, None));
-        assert!(!appimage_with("/tmp/.mount_CollabjIprLaX/evil", MOUNTS, None)); // ähnlicher Name, anderer Ordner
+        assert!(!appimage_with("/tmp/.mount_CollabjIprLaX/evil", MOUNTS, None)); // similar name, different directory
     }
 
     #[test]
     fn appimage_owner_must_fit() {
-        // Benutzer-Mount nur für denselben Benutzer
+        // user mount only for the same user
         assert!(appimage_with("/tmp/.mount_UserApp/bin/x", MOUNTS, Some(1000)));
         assert!(!appimage_with("/tmp/.mount_UserApp/bin/x", MOUNTS, Some(1001)));
         assert!(!appimage_with("/tmp/.mount_UserApp/bin/x", MOUNTS, None));
-        // Dienstkonto (www-data, UID 33) kann sich nicht tarnen
-        assert!(appimage_with("/tmp/.mount_WwwApp/bin/x", MOUNTS, Some(33))); // Collabora als www-data
-        assert!(!appimage_with("/tmp/.mount_WwwApp/bin/x", MOUNTS, Some(1000))); // fremder Benutzer
+        // service account (www-data, UID 33) cannot disguise itself
+        assert!(appimage_with("/tmp/.mount_WwwApp/bin/x", MOUNTS, Some(33))); // Collabora as www-data
+        assert!(!appimage_with("/tmp/.mount_WwwApp/bin/x", MOUNTS, Some(1000))); // different user
     }
 
     #[test]
@@ -367,7 +368,7 @@ mod tests {
         assert!(comm_matches("update-initramf", "/usr/sbin/update-initramfs"));
         assert!(!comm_matches("apt", "/usr/bin/apt-get"));
         assert!(!INSTALLERS.contains(&"tyrosecd"));
-        assert!(!INSTALLERS.iter().any(|n| n.len() > 15), "comm ist höchstens 15 Zeichen lang");
+        assert!(!INSTALLERS.iter().any(|n| n.len() > 15), "comm is at most 15 characters long");
     }
 
     #[test]
@@ -376,7 +377,7 @@ mod tests {
         assert!(!trusted_file("/usr/bin/../../tmp/dpkg"));
         assert!(!trusted_file("/usr/bin/dpkg (deleted)"));
         assert!(!trusted_file("/home/a/usr/bin/dpkg"));
-        // /bin/sh gibt es auf jedem Testsystem (root-eigen)
+        // /bin/sh exists on every test system (root-owned)
         let sh = std::fs::canonicalize("/bin/sh").unwrap().to_string_lossy().into_owned();
         if std::fs::metadata(&sh).map(|m| m.uid() == 0).unwrap_or(false) {
             assert!(trusted_file(&sh), "{sh}");
@@ -385,7 +386,7 @@ mod tests {
 
     #[test]
     fn renamed_shell_is_not_a_package_manager() {
-        // Symlink „dpkg“ → /bin/sh: comm heißt dpkg, das Programm ist aber die Shell, Argument kein Systemskript
+        // symlink "dpkg" → /bin/sh: comm is dpkg, but the program is the shell and the argument is not a system script
         let d = tempfile::tempdir().unwrap();
         let link = d.path().join("dpkg");
         std::os::unix::fs::symlink("/bin/sh", &link).unwrap();
@@ -409,29 +410,29 @@ mod tests {
             let e = format!("PATH=/usr/bin\0{v}\0HOME=/root\0");
             assert!(unsafe_env(e.as_bytes()).is_some(), "{v}");
         }
-        // leer gesetzt ist harmlos; ähnliche Namen zählen nicht
+        // set to empty is harmless; similar names do not count
         assert_eq!(unsafe_env(b"LD_PRELOAD=\0MY_ENV=1\0ENVIRONMENT=prod\0"), None);
     }
 
     #[test]
     fn path_lists_in_root_dirs_are_ok() {
-        // root-eigene Systemordner (gibt es auf jedem Testsystem) → unbedenklich
+        // root-owned system directories (exist on every test system) → harmless
         let usr_lib = std::fs::canonicalize("/usr/lib").unwrap().to_string_lossy().into_owned();
         if !root_chain(std::path::Path::new(&usr_lib)) {
-            return; // ungewöhnliches Testsystem
+            return; // unusual test system
         }
         assert!(safe_path_entry(&usr_lib));
-        assert!(safe_path_entry("/usr/lib")); // auch über einen Symlink-Elternordner (/lib → usr/lib bei merged-usr)
+        assert!(safe_path_entry("/usr/lib")); // also via a symlinked parent directory (/lib → usr/lib with merged-usr)
         for v in [format!("LD_LIBRARY_PATH={usr_lib}:/usr"), format!("PYTHONPATH={usr_lib}"), format!("PERL5LIB=/usr:{usr_lib}"),
             "PYTHONHOME=/usr:/usr".to_string(), "NODE_PATH=/usr/lib".to_string()] {
             assert_eq!(unsafe_env(format!("PATH=/usr/bin\0{v}\0").as_bytes()), None, "{v}");
         }
-        // vorgeladene Bibliothek aus root-eigenem Ordner (Datei, die es sicher gibt), auch mit Leerzeichen getrennt
+        // preloaded library from a root-owned directory (a file that surely exists), also separated by spaces
         let sh = std::fs::canonicalize("/bin/sh").unwrap().to_string_lossy().into_owned();
         if root_chain(std::path::Path::new(&sh)) {
             assert_eq!(unsafe_env(format!("LD_PRELOAD={sh} {sh}:{sh}\0").as_bytes()), None);
         }
-        // /tmp (für alle beschreibbar), relativ, leer (= aktuelles Verzeichnis), nicht vorhanden, „..“
+        // /tmp (writable by everyone), relative, empty (= current directory), nonexistent, ".."
         for e in ["/tmp", "lib", "./lib", "", "/nonexistent/lib", "/usr/../tmp"] {
             assert!(!safe_path_entry(e), "{e:?}");
         }
@@ -439,18 +440,18 @@ mod tests {
             "PYTHONPATH=lib", "LD_PRELOAD=/tmp/x.so"] {
             assert!(unsafe_env(format!("{v}\0").as_bytes()).is_some(), "{v}");
         }
-        // Ordner in /tmp und Symlink nach /tmp → nicht unbedenklich
+        // directory in /tmp and symlink to /tmp → not harmless
         let d = tempfile::tempdir().unwrap();
         assert!(!safe_path_entry(&d.path().to_string_lossy()));
         let link = d.path().join("lib");
         std::os::unix::fs::symlink("/tmp", &link).unwrap();
         assert!(!safe_path_entry(&link.to_string_lossy()));
-        // Code-Variablen bleiben streng, auch mit „harmlosem“ Inhalt
+        // code variables stay strict, even with "harmless" content
         for v in ["PYTHONSTARTUP=/usr/lib", "PERL5OPT=-w", "RUBYOPT=-W0", "NODE_OPTIONS=--max-old-space-size=100", "BASH_ENV=/usr/lib", "ENV=/usr/lib",
             "SHELLOPTS=braceexpand", "BASHOPTS=checkwinsize", "PYTHONINSPECT=1", "PERL5DB=x"] {
             assert!(unsafe_env(format!("{v}\0").as_bytes()).is_some(), "{v}");
         }
-        // Prüffunktion wird je Eintrag gefragt
+        // the check function is asked per entry
         assert_eq!(unsafe_env_with(b"LD_LIBRARY_PATH=/a:/b\0", &|e: &str| e == "/a" || e == "/b"), None);
         assert!(unsafe_env_with(b"LD_LIBRARY_PATH=/a:/c\0", &|e: &str| e == "/a" || e == "/b").is_some());
     }
@@ -483,15 +484,15 @@ mod tests {
         assert_eq!(shebang_index(&a(&["/bin/bash", "-p", "/usr/bin/dracut", "-f"]), "/usr/bin/bash", &lines, &canon), Some(2));
         assert_eq!(shebang_index(&a(&["/bin/sh", "/usr/sbin/update-initramfs", "-u"]), "/usr/bin/dash", &lines, &canon), Some(1));
         assert_eq!(shebang_index(&a(&["python3", "/usr/bin/apt-check"]), py, &lines, &canon), Some(1));
-        // Inline-Code und fremde Optionen vor dem Skript
+        // inline code and foreign options before the script
         assert_eq!(shebang_index(&a(&["python3", "-c", "import os", "/usr/bin/unattended-upgrade"]), py, &lines, &canon), None);
         assert_eq!(shebang_index(&a(&["python3", "-mevil", "/usr/bin/unattended-upgrade"]), py, &lines, &canon), None);
-        assert_eq!(shebang_index(&a(&["python3", "-s", "/usr/bin/unattended-upgrade"]), py, &lines, &canon), None); // -s steht nicht in dessen Shebang
+        assert_eq!(shebang_index(&a(&["python3", "-s", "/usr/bin/unattended-upgrade"]), py, &lines, &canon), None); // -s is not in its shebang
         assert_eq!(shebang_index(&a(&["perl", "-e", "system('x')", "/usr/sbin/needrestart"]), "/usr/bin/perl", &lines, &canon), None);
         assert_eq!(shebang_index(&a(&["sh", "-c", "evil", "/usr/sbin/update-initramfs"]), "/usr/bin/dash", &lines, &canon), None);
         assert_eq!(shebang_index(&a(&["sh", "-c", "/usr/sbin/update-initramfs"]), "/usr/bin/dash", &lines, &canon), None);
         assert_eq!(shebang_index(&a(&["python3"]), py, &lines, &canon), None);
-        // Skript ohne Shebang, oder für einen anderen Interpreter geschrieben
+        // script without shebang, or written for a different interpreter
         assert_eq!(shebang_index(&a(&["sh", "/usr/bin/plain"]), "/usr/bin/dash", &lines, &canon), None);
         assert_eq!(shebang_index(&a(&["/bin/bash", "/usr/bin/unattended-upgrade"]), "/usr/bin/bash", &lines, &canon), None);
         assert_eq!(shebang_index(&a(&["perl", "/usr/bin/apt-check"]), "/usr/bin/perl", &lines, &canon), None);
@@ -501,7 +502,7 @@ mod tests {
 
     #[test]
     fn preloaded_program_is_not_trusted() {
-        // nur als root aussagekräftig (verified_program verlangt euid 0)
+        // only meaningful as root (verified_program requires euid 0)
         if proc_euid(std::process::id() as i32) != Some(0) {
             return;
         }

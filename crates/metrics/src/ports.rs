@@ -1,6 +1,6 @@
-//! Verkehr je Port (Plan „Handeln“, Punkt 10): Schätzung aus den TCP-Verbindungen (`ss -tin`: Bytes je Verbindung).
-//! Eingehend = Dienst-Port dieses Servers, ausgehend = Ziel-Port. Grenzen: kein UDP; Verbindungen, die zwischen zwei
-//! Stichproben (15 s) beginnen und enden, fehlen. Keine Änderung am System (keine Firewall-Zähler).
+//! Traffic per port (actions plan, item 10): estimated from the TCP connections (`ss -tin`: bytes per connection).
+//! Incoming = service port of this server, outgoing = destination port. Limits: no UDP; connections that start and
+//! end between two samples (15 s) are missing. No changes to the system (no firewall counters).
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
 use tyrosd_proto::PortTraffic;
@@ -13,7 +13,7 @@ pub struct PortMeter {
     ss: Option<Option<&'static str>>,
 }
 
-/// lauschende TCP-Ports aus /proc/net/tcp{,6} (Status 0A)
+/// listening TCP ports from /proc/net/tcp{,6} (state 0A)
 pub fn listening() -> HashSet<u32> {
     let mut s = HashSet::new();
     for f in ["/proc/net/tcp", "/proc/net/tcp6"] {
@@ -37,7 +37,7 @@ fn field(info: &str, key: &str) -> Option<u64> {
     info.split_whitespace().find_map(|t| t.strip_prefix(key)).and_then(|v| v.parse().ok())
 }
 
-/// `ss -tinH`-Ausgabe → [(lokal, Gegenstelle, gesendet, empfangen)]
+/// `ss -tinH` output → [(local, peer, sent, received)]
 pub fn parse_ss(out: &str) -> Vec<(String, String, u64, u64)> {
     let mut v = Vec::new();
     let mut head: Option<(String, String)> = None;
@@ -50,7 +50,7 @@ pub fn parse_ss(out: &str) -> Vec<(String, String, u64, u64)> {
             }
         } else {
             let c: Vec<&str> = l.split_whitespace().collect();
-            // State Recv-Q Send-Q Local Peer [Prozess]
+            // State Recv-Q Send-Q Local Peer [process]
             head = (c.len() >= 5 && c[0] != "LISTEN").then(|| (c[3].to_string(), c[4].to_string()));
         }
     }
@@ -71,7 +71,7 @@ impl PortMeter {
     pub fn feed(&mut self, out: &str, listen: &HashSet<u32>) {
         let mut cur = HashMap::new();
         for (loc, peer, tx, rx) in parse_ss(out).into_iter().take(20_000) {
-            // Verbindungen innerhalb des Servers (localhost) sind kein Netzwerkverkehr und würden doppelt zählen
+            // Connections within the server (localhost) are not network traffic and would be counted twice
             if [&peer, &loc].iter().any(|a| a.starts_with("127.") || a.starts_with("[::1]") || a.starts_with("[::ffff:127.")) {
                 continue;
             }
@@ -79,7 +79,7 @@ impl PortMeter {
             let key = (loc, peer);
             let (dtx, drx) = match self.last.get(&key) {
                 Some(&(ltx, lrx)) => (tx.saturating_sub(ltx), rx.saturating_sub(lrx)),
-                None if self.primed => (tx, rx), // neue Verbindung seit der letzten Stichprobe
+                None if self.primed => (tx, rx), // new connection since the last sample
                 None => (0, 0),
             };
             let k = if listen.contains(&lp) { (lp, "in") } else { (pp, "out") };
@@ -95,7 +95,7 @@ impl PortMeter {
         self.primed = true;
     }
 
-    /// Minute abschließen: die 30 Ports mit dem meisten Verkehr
+    /// Close the minute: the 30 ports with the most traffic
     pub fn take(&mut self) -> Vec<PortTraffic> {
         let mut v: Vec<PortTraffic> = self
             .acc
@@ -121,14 +121,14 @@ mod tests {
         assert_eq!(parse_ss(S1).len(), 2);
         let listen: HashSet<u32> = [443, 22].into();
         let mut m = PortMeter::default();
-        m.feed(S1, &listen); // erste Stichprobe: nur merken
+        m.feed(S1, &listen); // first sample: only remember
         m.feed(S2, &listen);
         let t = m.take();
         let p443 = t.iter().find(|p| p.port == 443 && p.dir == "in").unwrap();
-        assert_eq!((p443.tx_bytes, p443.rx_bytes, p443.conns), (5000 + 700, 500 + 70, 2)); // inkl. neuer IPv6-Verbindung
+        assert_eq!((p443.tx_bytes, p443.rx_bytes, p443.conns), (5000 + 700, 500 + 70, 2)); // incl. new IPv6 connection
         let smtp = t.iter().find(|p| p.port == 25 && p.dir == "out").unwrap();
         assert_eq!((smtp.tx_bytes, smtp.rx_bytes), (20000, 100));
-        assert_eq!(t[0].port, 25); // meister Verkehr zuerst
+        assert_eq!(t[0].port, 25); // most traffic first
         assert!(m.take().is_empty());
     }
 }

@@ -1,17 +1,17 @@
-//! Redaction: maskiert Werte von Geheimnissen, bevor ein Diff entsteht.
-//! Arbeitet zeilenweise auf Bytes (Latin-1-sicher).
+//! Redaction: masks secret values before a diff is produced.
+//! Works line by line on bytes (Latin-1 safe).
 //!
-//! Sicherheitsprüfung H6: Standard für alle hochgeladenen Texte; Zuweisungen der Form `NAME=…`/`name: …`, deren Name
-//! nach Schlüssel/Passwort/Token aussieht (`APP_KEY`, `PrivateKey`, `client-key-data`, `PASSPHRASE` …), werden bis
-//! zum Zeilenende maskiert – nicht nur bis zum ersten Leerzeichen.
+//! Security review H6: default for all uploaded texts; assignments of the form `NAME=…`/`name: …` whose name
+//! looks like a key/password/token (`APP_KEY`, `PrivateKey`, `client-key-data`, `PASSPHRASE` …) are masked up
+//! to the end of the line – not just up to the first space.
 
 use regex::bytes::Regex;
 use std::sync::OnceLock;
 
 pub const MASK: &[u8] = b"***REDACTED***";
 
-/// Zeile ist eine Zuweisung an einen geheimen Namen → Wert bis Zeilenende maskieren.
-/// Gruppe 1 = alles bis einschließlich Trenner, Rest wird ersetzt.
+/// Line is an assignment to a secret name → mask the value up to the end of the line.
+/// Group 1 = everything up to and including the separator; the rest is replaced.
 fn assignment() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
@@ -22,9 +22,9 @@ fn assignment() -> &'static Regex {
     })
 }
 
-/// Konfigurationen mit „Schlüsselwort Leerzeichen Wert“ (ohne `=`/`:`) – redis
+/// Configurations of the form "keyword whitespace value" (without `=`/`:`) – redis
 /// (`requirepass`, `masterauth`), msmtp (`password`), keepalived (`auth_pass`), ldap.conf/nslcd (`bindpw`, `rootpwmodpw`),
-/// sssd (`ldap_default_authtok`). Nur kleingeschrieben (so stehen sie in den Dateien) – Fließtext wie „Password …“ bleibt.
+/// sssd (`ldap_default_authtok`). Lowercase only (as they appear in the files) – prose like "Password …" is kept.
 fn keyword_value() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
@@ -33,13 +33,13 @@ fn keyword_value() -> &'static Regex {
     })
 }
 
-/// redis-ACL: `user name on >klartext #sha256 …` → Passwörter (`>…`, `<…`) und Hashes (`#…`, `!…`) maskieren
+/// redis ACL: `user name on >plaintext #sha256 …` → mask passwords (`>…`, `<…`) and hashes (`#…`, `!…`)
 fn redis_user() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| Regex::new(r#"(\s)([><#!])(\S+)"#).expect("Redaction-Regex"))
 }
 
-/// strongSwan/libreswan `ipsec.secrets`: `[ids] : PSK|RSA|ECDSA|EAP|XAUTH|… geheim` → alles nach dem `:` maskieren
+/// strongSwan/libreswan `ipsec.secrets`: `[ids] : PSK|RSA|ECDSA|EAP|XAUTH|… secret` → mask everything after the `:`
 fn ipsec_secret() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
@@ -47,8 +47,8 @@ fn ipsec_secret() -> &'static Regex {
     })
 }
 
-/// OpenVPN-Inline-Blöcke mit Schlüsseln/Zugangsdaten (`<key>`, `<tls-auth>`, `<tls-crypt>`, `<tls-crypt-v2>`,
-/// `<secret>`, `<pkcs12>`, `<auth-user-pass>`, `<http-proxy-user-pass>`): Inhalt komplett ersetzen
+/// OpenVPN inline blocks with keys/credentials (`<key>`, `<tls-auth>`, `<tls-crypt>`, `<tls-crypt-v2>`,
+/// `<secret>`, `<pkcs12>`, `<auth-user-pass>`, `<http-proxy-user-pass>`): replace the content entirely
 const OVPN_BLOCKS: &[&str] = &["key", "tls-auth", "tls-crypt", "tls-crypt-v2", "secret", "pkcs12", "auth-user-pass", "http-proxy-user-pass"];
 
 fn ovpn_open(body: &[u8]) -> Option<&'static str> {
@@ -66,11 +66,11 @@ fn rules() -> &'static [Regex] {
     static R: OnceLock<Vec<Regex>> = OnceLock::new();
     R.get_or_init(|| {
         [
-            // PHP define('DB_PASSWORD', 'wert');  WordPress-Salts ebenso
+            // PHP define('DB_PASSWORD', 'value');  WordPress salts likewise
             r#"(?i)(define\(\s*['"][A-Z_]*(PASSWORD|_KEY|_SALT|SECRET|TOKEN|PASSPHRASE)['"]\s*,\s*['"])([^'"]*)(['"])"#,
-            // KEY=wert, key: wert, "key" => "wert" (mitten in der Zeile, z. B. PHP-Arrays)
+            // KEY=value, key: value, "key" => "value" (in the middle of a line, e.g. PHP arrays)
             r#"(?i)((?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|access[_-]?key|private[_-]?key|client[_-]?secret|auth_?(?:token|key|pass)|[a-z0-9]*_key)[A-Za-z0-9_\-]*['"]?\s*(?:=>|=|:)\s*['"]?)([^'"\s,;]+)(['"]?)"#,
-            // URLs mit Zugangsdaten: scheme://user:pass@host
+            // URLs with credentials: scheme://user:pass@host
             r#"([a-z][a-z0-9+.\-]*://[^:/\s]+:)([^@/\s]+)(@)"#,
         ]
         .iter()
@@ -79,7 +79,7 @@ fn rules() -> &'static [Regex] {
     })
 }
 
-/// Maskiert Geheimnisse. PEM-Private-Key-Blöcke werden komplett ersetzt.
+/// Masks secrets. PEM private key blocks are replaced entirely.
 pub fn redact(data: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
     let mut in_pem = false;
@@ -101,8 +101,8 @@ pub fn redact(data: &[u8]) -> Vec<u8> {
             continue;
         }
         if contains(line, b"-----BEGIN") && contains(line, b"PRIVATE KEY") {
-            // „-----BEGIN (RSA|EC|OPENSSH|ENCRYPTED|PGP) PRIVATE KEY( BLOCK)-----“; steht das Ende in derselben Zeile
-            // (z. B. JSON mit \n), nur diese Zeile ersetzen
+            // "-----BEGIN (RSA|EC|OPENSSH|ENCRYPTED|PGP) PRIVATE KEY( BLOCK)-----"; if the end is on the same line
+            // (e.g. JSON with \n), replace only this line
             in_pem = !contains(line, b"-----END");
             out.extend_from_slice(b"-----BEGIN PRIVATE KEY (REDACTED)-----\n");
             continue;
@@ -113,7 +113,7 @@ pub fn redact(data: &[u8]) -> Vec<u8> {
             }
             continue;
         }
-        // Zeilenende abtrennen (Regex arbeitet auf der Zeile ohne \r\n)
+        // Split off the line ending (regex works on the line without \r\n)
         let body_len = line.len() - line.iter().rev().take_while(|b| **b == b'\n' || **b == b'\r').count();
         let (body, eol) = line.split_at(body_len);
         let is_comment = body.iter().find(|b| !b.is_ascii_whitespace()).is_some_and(|b| *b == b'#' || *b == b';');
@@ -125,7 +125,7 @@ pub fn redact(data: &[u8]) -> Vec<u8> {
                 continue;
             }
             if is_redis_acl(body) {
-                // redis-ACL (`user name on >pw`): Passwörter/Hashes maskieren, Rechte bleiben lesbar
+                // redis ACL (`user name on >pw`): mask passwords/hashes, permissions stay readable
                 let l = redis_user().replace_all(body, |c: &regex::bytes::Captures| {
                     let mut v = c[1].to_vec();
                     v.extend_from_slice(&c[2]);
@@ -144,7 +144,7 @@ pub fn redact(data: &[u8]) -> Vec<u8> {
                     let mut v = Vec::new();
                     v.extend_from_slice(&c[1]);
                     v.extend_from_slice(MASK);
-                    // letzte Gruppe = schließendes Zeichen
+                    // last group = closing character
                     let last = if i == 0 { 4 } else { 3 };
                     if let Some(m) = c.get(last) {
                         v.extend_from_slice(m.as_bytes());
@@ -159,7 +159,7 @@ pub fn redact(data: &[u8]) -> Vec<u8> {
     out
 }
 
-/// `user <name> on|off … >pw` (redis.conf / users.acl) – nicht jede Zeile, die mit „user“ beginnt (nginx: `user www-data;`)
+/// `user <name> on|off … >pw` (redis.conf / users.acl) – not every line starting with "user" (nginx: `user www-data;`)
 fn is_redis_acl(body: &[u8]) -> bool {
     let mut t = body.split(|b| b.is_ascii_whitespace()).filter(|t| !t.is_empty());
     t.next() == Some(b"user".as_slice())
@@ -167,10 +167,10 @@ fn is_redis_acl(body: &[u8]) -> bool {
         && t.any(|w| matches!(w, b"on" | b"off" | b"nopass" | b"resetpass" | b"reset") || w.starts_with(b"+") || w.starts_with(b"~"))
 }
 
-/// Maskieren mit Kenntnis des Dateinamens: Formate, deren Geheimnis an einer festen Stelle
-/// steht, ohne erkennbaren Namen davor – `chap-secrets`/`pap-secrets` (3. Spalte), Postfix `sasl_passwd`
-/// (`host user:passwort`), OpenVPN-`auth-user-pass`-Dateien (Benutzer, Passwort). Danach immer `redact`.
-/// Für Container-Pfade wird nur der Dateiname/Ordner betrachtet – der Präfix stört nicht.
+/// Masking with knowledge of the file name: formats whose secret is at a fixed position
+/// without a recognizable name before it – `chap-secrets`/`pap-secrets` (3rd column), Postfix `sasl_passwd`
+/// (`host user:password`), OpenVPN `auth-user-pass` files (user, password). Always followed by `redact`.
+/// For container paths only the file name/folder is considered – the prefix does not interfere.
 pub fn redact_path(path: &str, data: &[u8]) -> Vec<u8> {
     let name = path.rsplit('/').next().unwrap_or(path);
     let pre = if name == "chap-secrets" || name == "pap-secrets" || name == "srp-secrets" {
@@ -198,8 +198,8 @@ pub fn redact_path(path: &str, data: &[u8]) -> Vec<u8> {
     }
 }
 
-/// Datei neben einer OpenVPN-Konfiguration, die nur aus Benutzer und Passwort besteht (`auth-user-pass datei`):
-/// Ordner `openvpn`, keine Konfiguration (.conf/.ovpn), 2 nicht-leere Zeilen ohne Leerzeichen
+/// File next to an OpenVPN configuration consisting only of user and password (`auth-user-pass file`):
+/// folder `openvpn`, not a configuration (.conf/.ovpn), 2 non-empty lines without spaces
 fn is_ovpn_credentials(path: &str, data: &[u8]) -> bool {
     if !path.split('/').any(|c| c == "openvpn") || path.ends_with(".conf") || path.ends_with(".ovpn") || data.len() > 4096 {
         return false;
@@ -208,7 +208,7 @@ fn is_ovpn_credentials(path: &str, data: &[u8]) -> bool {
     lines.len() == 2 && lines.iter().all(|l| !l.iter().any(|b| *b == b' ' || *b == b'\t'))
 }
 
-/// Zeilenweise umschreiben (`f` liefert Ersatz für den Zeileninhalt ohne Zeilenende, oder None = unverändert)
+/// Rewrite line by line (`f` returns a replacement for the line content without line ending, or None = unchanged)
 fn map_lines(data: &[u8], mut f: impl FnMut(&[u8]) -> Option<Vec<u8>>) -> Vec<u8> {
     let mut out = Vec::with_capacity(data.len());
     for line in data.split_inclusive(|b| *b == b'\n') {
@@ -223,8 +223,8 @@ fn map_lines(data: &[u8], mut f: impl FnMut(&[u8]) -> Option<Vec<u8>>) -> Vec<u8
     out
 }
 
-/// ab Spalte `n` (0-basiert, durch Leerraum getrennt; Anführungszeichen halten zusammen) bis Zeilenende maskieren;
-/// Kommentare und kürzere Zeilen bleiben
+/// Mask from column `n` (0-based, separated by whitespace; quotes keep a field together) to the end of the line;
+/// comments and shorter lines are kept
 fn mask_from_field(body: &[u8], n: usize) -> Option<Vec<u8>> {
     if trim(body).is_empty() || trim(body).starts_with(b"#") {
         return None;
@@ -259,7 +259,7 @@ fn mask_from_field(body: &[u8], n: usize) -> Option<Vec<u8>> {
     None
 }
 
-/// Postfix `sasl_passwd`: `[smtp.example.com]:587 benutzer:passwort` → Passwort nach dem ersten `:` der 2. Spalte
+/// Postfix `sasl_passwd`: `[smtp.example.com]:587 user:password` → password after the first `:` of the 2nd column
 fn mask_sasl(body: &[u8]) -> Option<Vec<u8>> {
     let t = trim(body);
     if t.is_empty() || t.starts_with(b"#") {
@@ -323,8 +323,8 @@ mod tests {
     }
     #[test]
     fn passphrase_to_end_of_line() {
-        let r = s(redact(b"SSL_PASSPHRASE=correct horse battery staple\nwpa_passphrase=mein geheimes wlan\n"));
-        assert!(!r.contains("horse") && !r.contains("geheimes"), "{r}");
+        let r = s(redact(b"SSL_PASSPHRASE=correct horse battery staple\nwpa_passphrase=my hidden wlan\n"));
+        assert!(!r.contains("horse") && !r.contains("hidden"), "{r}");
     }
     #[test]
     fn url_creds() {
@@ -341,7 +341,7 @@ mod tests {
         let r = s(redact(b"x\n-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA\n-----END OPENSSH PRIVATE KEY-----\n-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBF\n-----END PGP PRIVATE KEY BLOCK-----\ny\n"));
         assert!(!r.contains("b3BlbnNzaA") && !r.contains("lQOYBF"), "{r}");
         assert!(r.ends_with("y\n"));
-        // Schlüssel in einer Zeile (JSON): nur die Zeile, nicht der Rest der Datei
+        // Key on a single line (JSON): only that line, not the rest of the file
         let r = s(redact(b"{\"private_key\": \"-----BEGIN PRIVATE KEY-----\\nMIIE\\n-----END PRIVATE KEY-----\\n\",\n\"ok\": 1}\n"));
         assert!(!r.contains("MIIE") && r.contains("\"ok\": 1"), "{r}");
     }
@@ -353,7 +353,7 @@ mod tests {
         let r = s(redact(b"user alice on >AlicePw #5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8 ~cache:* +get\nuser default off nopass\n"));
         assert!(!r.contains("AlicePw") && !r.contains("5e884898"), "{r}");
         assert!(r.contains("~cache:* +get") && r.contains("user default off nopass"), "{r}");
-        // nginx „user“ bleibt
+        // nginx "user" is kept
         assert_eq!(s(redact(b"user www-data;\n")), "user www-data;\n");
     }
     #[test]
@@ -408,18 +408,18 @@ mod tests {
             assert!(!r.contains(x), "{x}: {r}");
         }
         assert!(r.contains("MIIca") && r.contains("verb 3") && r.contains("</tls-auth>\n<tls-crypt>"), "{r}");
-        // auth-user-pass-Datei: Benutzer bleibt, Passwort maskiert
+        // auth-user-pass file: user is kept, password masked
         let r = s(redact_path("/etc/openvpn/client/office.auth", b"vpnuser\nVpnPassw0rd\n"));
         assert_eq!(r, "vpnuser\n***REDACTED***\n");
         let r = s(redact_path("/etc/openvpn/creds.txt", b"vpnuser\r\nVpnPassw0rd\r\n"));
         assert!(!r.contains("VpnPassw0rd"), "{r}");
-        // außerhalb von openvpn/ bleibt eine zweizeilige Datei unverändert
+        // outside of openvpn/ a two-line file stays unchanged
         assert_eq!(s(redact_path("/var/www/a/b.txt", b"hello\nworld\n")), "hello\nworld\n");
     }
     #[test]
     fn code_stays_readable() {
-        // normaler Code ohne Geheimnisse bleibt unverändert (Diffs der Webroots)
-        let code = b"<?php\n$title = 'Shop';\necho htmlspecialchars($title);\n# key: nur ein Kommentar\n";
+        // normal code without secrets stays unchanged (webroot diffs)
+        let code = b"<?php\n$title = 'Shop';\necho htmlspecialchars($title);\n# key: just a comment\n";
         assert_eq!(redact(code), code.to_vec());
     }
 }

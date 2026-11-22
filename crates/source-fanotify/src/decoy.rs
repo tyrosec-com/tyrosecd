@@ -1,15 +1,15 @@
-//! Köder-Dateien (Plan „Köder-Zugangsdaten“, 18.11.2026): meldet, wenn ein Prozess eine Köder-Datei **öffnet**.
-//! Eine Köder-Datei enthält falsche Zugangsdaten und wird von niemandem gebraucht – wer sie liest, sucht auf dem Server
-//! nach Zugangsdaten (Einbruch) oder ist ein Sicherungs-/Prüfprogramm (wird vom Aufrufer eingeordnet).
+//! Decoy files (plan "decoy credentials", 2026-11-18): reports when a process **opens** a decoy.
+//! A decoy file contains fake credentials and is needed by nobody – whoever reads it is searching the server
+//! for credentials (intrusion) or is a backup/scanning program (classified by the caller).
 //!
-//! Eigene fanotify-Gruppe mit **Inode-Markierungen nur auf den Köder-Dateien** – kostet nichts, berührt den
-//! Datei-Wächter nicht.
+//! Separate fanotify group with **inode marks only on the decoy files** – costs nothing, does not touch the
+//! file watcher.
 //!
-//! Ab 0.4.16 als Berechtigungs-Abfrage (`FAN_OPEN_PERM`): Der öffnende Prozess wartet, bis der Agent geantwortet hat –
-//! so ist er beim Nachschlagen von Name und Prozesskette garantiert noch da (vorher fehlte er bei kurzlebigen
-//! Programmen wie `cat`). Die Antwort ist **immer „erlauben“**; nichts wird verhindert. Endet der Agent, gibt der
-//! Kernel wartende Zugriffe selbst frei. Ohne Kernel-Unterstützung (CONFIG_FANOTIFY_ACCESS_PERMISSIONS) wie bisher als
-//! reine Benachrichtigung (`FAN_OPEN`).
+//! Since 0.4.16 as a permission request (`FAN_OPEN_PERM`): the opening process waits until the agent has replied –
+//! so it is guaranteed to still exist while name and process chain are looked up (previously it was missing for
+//! short-lived programs like `cat`). The reply is **always "allow"**; nothing is prevented. If the agent exits, the
+//! kernel releases pending accesses itself. Without kernel support (CONFIG_FANOTIFY_ACCESS_PERMISSIONS), as before, as
+//! a plain notification (`FAN_OPEN`).
 
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::time::{Duration, Instant};
@@ -22,13 +22,13 @@ const FAN_OPEN: u64 = 0x0000_0020;
 const FAN_OPEN_PERM: u64 = 0x0001_0000;
 const FAN_CLASS_CONTENT: u32 = 0x0000_0004;
 const FAN_ALLOW: u32 = 0x01;
-/// dieselbe Datei durch denselben Prozess höchstens einmal je Minute melden
+/// report the same file by the same process at most once per minute
 const REPEAT: Duration = Duration::from_secs(60);
 
 pub struct DecoyWatch {
     fd: OwnedFd,
     self_pid: i32,
-    /// Berechtigungs-Abfrage (Prozess wartet) statt reiner Benachrichtigung
+    /// Permission request (process waits) instead of a plain notification
     perm: bool,
 }
 
@@ -46,12 +46,12 @@ impl DecoyWatch {
         self.perm
     }
 
-    /// Köder-Datei beobachten (Inode-Markierung auf Öffnen)
+    /// Watch a decoy file (inode mark on open)
     pub fn watch(&self, path: &str) -> std::io::Result<()> {
         if self.perm {
             match fanotify_mark(self.fd.as_raw_fd(), FAN_MARK_ADD, FAN_OPEN_PERM, path) {
                 Ok(()) => return Ok(()),
-                // Kernel ohne Berechtigungs-Ereignisse: dann eben als Benachrichtigung in derselben Gruppe
+                // kernel without permission events: then simply as a notification in the same group
                 Err(e) if e.raw_os_error() == Some(libc::EINVAL) => {}
                 Err(e) => return Err(e),
             }
@@ -64,17 +64,17 @@ impl DecoyWatch {
         let mut b = [0u8; 8];
         b[..4].copy_from_slice(&efd.to_ne_bytes());
         b[4..].copy_from_slice(&FAN_ALLOW.to_ne_bytes());
-        // SAFETY: Puffer gültig, fd der Gruppe gültig
+        // SAFETY: buffer valid, group fd valid
         unsafe { libc::write(self.fd.as_raw_fd(), b.as_ptr() as *const libc::c_void, b.len()) };
     }
 
-    /// Ereignisschleife (blockiert): `emit(pfad, pid)` je Öffnen durch einen fremden Prozess. Bei Berechtigungs-
-    /// Ereignissen wird `emit` aufgerufen, **bevor** der Zugriff freigegeben wird (Prozess lebt noch).
+    /// Event loop (blocking): `emit(path, pid)` per open by a foreign process. For permission
+    /// events `emit` is called **before** the access is released (process is still alive).
     pub fn run(&self, emit: impl Fn(String, i32)) -> Result<()> {
         let mut buf = vec![0u8; 16 * 1024];
         let mut seen: std::collections::HashMap<(String, i32), Instant> = std::collections::HashMap::new();
         loop {
-            // SAFETY: buf ist gültig
+            // SAFETY: buf is valid
             let n = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n < 0 {
                 let e = std::io::Error::last_os_error();
@@ -113,9 +113,9 @@ impl DecoyWatch {
                 }
                 if efd >= 0 {
                     if mask & FAN_OPEN_PERM != 0 {
-                        self.allow(efd); // immer erlauben – auch bei eigenem Prozess und Wiederholungen
+                        self.allow(efd); // always allow – also for our own process and repeats
                     }
-                    // SAFETY: fd vom Kernel, wir schließen ihn
+                    // SAFETY: fd from the kernel, we close it
                     unsafe { libc::close(efd) };
                 }
             }

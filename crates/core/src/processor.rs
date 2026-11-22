@@ -1,8 +1,8 @@
-//! Verarbeitung eines (entprellten) Ereignisses: Policy → Inhalt lesen →
-//! Hash → Diff gegen Basis → Patch-Verifikation → Event.
+//! Processing of a (debounced) event: policy → read content →
+//! hash → diff against base → patch verification → event.
 //!
-//! Zustand (Hashes, Metadaten, Diff-Basis) liegt in `State` (eingebettete
-//! Datenbank), nicht im RAM. Echtzeit und Scan teilen sich diesen Zustand.
+//! State (hashes, metadata, diff base) lives in `State` (embedded
+//! database), not in RAM. Real-time monitoring and scan share this state.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -20,7 +20,7 @@ use crate::sink::Sink;
 use crate::sink::JsonlSink;
 use crate::state::{hash_from_hex, Entry, State};
 
-/// Temp-Verzeichnisse, in denen kurzlebige Dateien üblich sind
+/// Temp directories in which short-lived files are common
 pub fn is_temp_path(p: &str) -> bool {
     ["/tmp/", "/var/tmp/", "/dev/shm/", "/run/user/"].iter().any(|d| p.starts_with(d))
 }
@@ -30,59 +30,62 @@ pub struct Processor {
     pub state: Arc<State>,
     pub sink: Box<dyn Sink>,
     pub algo: Algo,
-    /// Diff-Text (gekürzt) ins Event schreiben – nur für den Spike.
+    /// Write the (truncated) diff text into the event – spike only.
     pub emit_diff: bool,
-    /// Patch nach dem Erzeugen anwenden und Hash prüfen (wie der Ingest).
+    /// Apply the patch after creating it and check the hash (like the ingest).
     pub verify_patch: bool,
     pub stats: Mutex<Stats>,
-    /// Ereignisrate pro Verzeichnis (automatische Herabstufung, Hauptplan 5)
+    /// Event rate per directory (automatic downgrade, main plan 5)
     hot: Mutex<HashMap<String, Hot>>,
-    /// herabgestufte Ordner → Ende der Herabstufung; danach Nachscan (übersprungene Dateien nachholen)
+    /// downgraded directories → end of the downgrade; then rescan
+    /// (catch up on skipped files)
     hot_rescan: Mutex<HashMap<String, Instant>>,
-    /// Deploy-Fenster (Marker-Datei), optional
+    /// Deploy window (marker file), optional
     pub deploy: Option<crate::deploy::DeployWindow>,
-    /// Paket-Update-Fenster für Ereignisse ohne Prozess (inotify)
+    /// Package update window for events without a process (inotify)
     pub pkg_window: crate::pkgwindow::PkgWindow,
 }
 
 struct Hot {
     window_start: Instant,
     count: u32,
-    /// davon im aktuellen Fenster: vom geprüften Paketmanager (`ProcInfo::pkg`) bzw. über das Paket-Update-Fenster
+    /// of these, in the current window: from the verified package manager (`ProcInfo::pkg`)
+    /// or via the package update window
     pm: u32,
     pkg_window: u32,
     until: Option<Instant>,
     skipped: u64,
 }
 
-/// Mehr Ereignisse pro Minute in einem Verzeichnis → für `HOT_HOLD` nur noch Code-Dateien verarbeiten.
+/// More events per minute in a directory → only process code files for `HOT_HOLD`.
 pub const HOT_PER_MIN: u32 = 200;
 pub const HOT_HOLD: Duration = Duration::from_secs(600);
 
 enum HotState {
     Normal,
     Skip,
-    /// (Ordner, Ereignisse/min, Paket-Markierung für das Sammel-Ereignis)
+    /// (directory, events/min, package marker for the aggregate event)
     JustDowngraded(String, u32, Option<&'static str>),
 }
 
-/// Herkunft eines Schreibzugriffs in Bezug auf die Paketverwaltung (wie bei Einzel-Ereignissen bestimmt)
+/// Origin of a write access with respect to package management (determined as for individual events)
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PkgOrigin {
-    /// Prozess oder Vorfahre ist ein geprüfter Paketmanager (Programmdatei, nicht der Name)
+    /// Process or ancestor is a verified package manager (executable, not the name)
     Pm,
-    /// ohne lebende Prozess-Zuordnung, zeitlich im Paket-Update-Fenster (`PkgWindow::applies`)
+    /// without a live process mapping, within the package update window in time (`PkgWindow::applies`)
     Window,
     None,
 }
 
-/// Dateien, die nie herabgestuft werden (ausführbarer Code, Webshell-/Skimmer-Träger).
-/// Auch PHP-Steuerdateien (`.user.ini` → auto_prepend_file), SSH-Schlüssel und Templates (Twig/Smarty/Latte
-/// führen Code aus) – sonst ließe sich ein Ordner gezielt „heiß“ machen, um sie zu verstecken.
-/// Build-Ausgabe von Next.js (`…/.next/server/…`, `…/.next/static/…`) → Wurzel `…/.next`. Ein Build ersetzt dort
-/// Tausende Dateien auf einmal (Praxisfall auf Entwickler-Servern: ≈ 70 % aller Ereignisse). Während eines
-/// Builds zählt die ganze Wurzel als *ein* heißer Ordner – auch Code-Dateien werden dann nur gezählt (eine Sammelmeldung
-/// je Build, kein Nachscan); außerhalb von Builds wird jede Änderung wie bisher einzeln geprüft.
+/// Files that are never downgraded (executable code, webshell/skimmer carriers).
+/// Also PHP control files (`.user.ini` → auto_prepend_file), SSH keys and templates (Twig/Smarty/Latte
+/// execute code) – otherwise a directory could be deliberately made “hot” to hide them.
+/// Next.js build output (`…/.next/server/…`, `…/.next/static/…`) → root `…/.next`. A build replaces
+/// thousands of files there at once (real case on developer servers: ≈ 70 % of all events). During a
+/// build the whole root counts as *one* hot directory – code files are then only counted as well
+/// (one aggregate report
+/// per build, no rescan); outside of builds every change is checked individually as before.
 pub fn build_root(path: &str) -> Option<String> {
     let i = path.find("/.next/")?;
     let rest = &path[i + 7..];
@@ -109,7 +112,7 @@ pub struct Stats {
     pub bytes_read: u64,
     pub cache_full: u64,
     pub hot_skipped: u64,
-    /// kurzlebige Temp-Dateien (angelegt und gleich wieder weg), nicht gemeldet
+    /// short-lived temp files (created and gone right away), not reported
     pub temp_gone: u64,
 }
 
@@ -122,17 +125,17 @@ pub struct Input {
     pub old_path: Option<String>,
     pub proc: Option<ProcInfo>,
     pub note: Option<String>,
-    /// WRITE_NOCHANGE nicht melden (Scan: nur Zeitstempel geändert)
+    /// Do not report WRITE_NOCHANGE (scan: only timestamps changed)
     pub quiet_nochange: bool,
 }
 
-/// Gelesener Inhalt einer Datei
+/// Content read from a file
 struct Content {
     raw: [u8; 32],
     raw_hex: String,
-    /// (Hash, gespeicherte ggf. maskierte Fassung) – nur bei Text im Modus full/redacted
+    /// (hash, stored possibly masked version) – only for text in mode full/redacted
     stored: Option<([u8; 32], Vec<u8>)>,
-    /// Maskierung hat etwas verändert
+    /// Masking changed something
     masked: bool,
 }
 
@@ -145,7 +148,7 @@ impl Processor {
         Processor { policy, state, sink, algo, emit_diff: false, verify_patch: true, stats: Mutex::new(Stats::default()), hot: Mutex::new(HashMap::new()), hot_rescan: Mutex::new(HashMap::new()), deploy: None, pkg_window: Default::default() }
     }
 
-    /// Ordner, deren Herabstufung abgelaufen ist und die jetzt nachgescannt werden sollen (einmalig je Herabstufung).
+    /// Directories whose downgrade has expired and which should now be rescanned (once per downgrade).
     pub fn take_due_rescans(&self) -> Vec<String> {
         let now = Instant::now();
         let mut m = self.hot_rescan.lock().unwrap();
@@ -156,14 +159,14 @@ impl Processor {
         due
     }
 
-    /// Roh-Hash für die Wiederherstellungs-Prüfung merken (nur SHA-256, nur Inhalts-überwachte Dateien)
+    /// Remember the raw hash for the restore check (SHA-256 only, content-monitored files only)
     fn remember(&self, path: &str, mode: ContentMode, raw: &[u8; 32]) {
         if self.algo == Algo::Sha256 && mode >= ContentMode::Redacted {
             self.state.remember(path, raw);
         }
     }
 
-    /// Baseline für einen Pfad aufnehmen, ohne Event (Agent-Start).
+    /// Record a baseline for a path, without an event (agent start).
     pub fn prime(&self, path: &str) {
         let mode = self.policy.mode_for(path);
         if mode < ContentMode::Hash {
@@ -171,7 +174,7 @@ impl Processor {
         }
         let Some(meta) = FileMeta::from_path(path) else { return };
         if meta.mode & libc::S_IFMT == libc::S_IFLNK {
-            // Symlinks: Ziel als „Inhalt“ merken, sonst meldet jeder Scan sie neu
+            // Symlinks: remember the target as “content”, otherwise every scan reports them again
             if let Some(t) = link_target(path) {
                 self.state.put(path, Entry { hash: link_hash(&t), stored: None, meta });
             }
@@ -240,8 +243,8 @@ impl Processor {
         if e.count > HOT_PER_MIN {
             e.until = Some(now + HOT_HOLD);
             let n = e.count;
-            // Paket-Markierung nur, wenn **alle** gezählten Schreibzugriffe des Fensters von der Paketverwaltung kamen
-            // (ein einzelner fremder Schreiber – z. B. eine Webshell, die mitten im apt-Lauf schreibt – nimmt sie weg)
+            // Package marker only if **all** counted write accesses of the window came from package management
+            // (a single foreign writer – e.g. a webshell writing in the middle of an apt run – removes it)
             let pkg = if e.pm == n {
                 Some("pkg")
             } else if e.pm + e.pkg_window == n {
@@ -250,8 +253,8 @@ impl Processor {
                 None
             };
             drop(h);
-            // „/“ nicht (wäre ein Vollscan; dafür gibt es den regelmäßigen Abgleich)
-            // Build-Ausgabe nicht nachscannen (würde jede neu gebaute Datei einzeln nachmelden)
+            // not “/” (that would be a full scan; the periodic reconciliation covers it)
+            // do not rescan build output (would re-report every newly built file individually)
             if dir != "/" && build.is_none() {
                 let mut r = self.hot_rescan.lock().unwrap();
                 if r.len() < 1000 {
@@ -263,28 +266,29 @@ impl Processor {
         HotState::Normal
     }
 
-    /// Bekannter Zustand eines Pfads.
+    /// Known state of a path.
     pub fn entry(&self, path: &str) -> Option<Entry> {
         self.state.get(path)
     }
 
-    /// Pfad – oder bei temporären Namen der Paketverwaltung (`x.dpkg-new`, rpm `x;1a2b3c4d`) das Ziel – ist im lokalen
-    /// Zustand bekannt (für das Paket-Update-Fenster: unter /lib/systemd zählt nur das Ersetzen bekannter Dateien)
+    /// The path – or, for temporary names of package management (`x.dpkg-new`, rpm `x;1a2b3c4d`), its target –
+    /// is known in the local
+    /// state (for the package update window: under /lib/systemd only replacing known files counts)
     fn known_or_pkg_temp(&self, path: &str) -> bool {
         if !(path.starts_with("/lib/systemd/") || path.starts_with("/usr/lib/systemd/")) {
-            return true; // nur dort relevant – spart den Zustandszugriff
+            return true; // only relevant there – saves the state lookup
         }
         self.state.get(path).is_some() || crate::pkgwindow::pkg_temp_target(path).is_some_and(|t| self.state.get(t).is_some())
     }
 
-    /// Anzahl bekannter Pfade.
+    /// Number of known paths.
     pub fn known(&self) -> u64 {
         self.state.count()
     }
 
     fn read_content(&self, path: &str, mode: ContentMode, meta: &FileMeta) -> Option<Content> {
         if mode >= ContentMode::Redacted && meta.size <= self.policy.diff_limit_bytes {
-            // O_NOFOLLOW + fstat; Inode muss zu den eben gelesenen Metadaten passen (sonst getauscht → nicht lesen)
+            // O_NOFOLLOW + fstat; inode must match the metadata just read (otherwise swapped → do not read)
             let (data, ino) = content::read_limited_ino(path, self.policy.diff_limit_bytes).ok()??;
             if ino != meta.ino {
                 return None;
@@ -295,8 +299,8 @@ impl Processor {
             if !content::is_text(&data) {
                 return Some(Content { raw, raw_hex, stored: None, masked: false });
             }
-            // Standard „maskiert“ für alle hochgeladenen Texte (Sicherheitsprüfung H6); „full“ ohne Maskierung nur,
-            // wenn die lokale Policy das ausdrücklich abschaltet (redact_full = false)
+            // Default “masked” for all uploaded texts (security review H6); “full” without masking only
+            // if the local policy explicitly disables it (redact_full = false)
             let (stored, masked) = if mode == ContentMode::Redacted || self.policy.redact_full {
                 let r = redact::redact_path(path, &data);
                 let m = r != data;
@@ -318,7 +322,7 @@ impl Processor {
         }
     }
 
-    /// Liefert true, wenn ein Ereignis gemeldet wurde.
+    /// Returns true if an event was reported.
     pub fn process(&self, inp: Input) -> bool {
         if inp.op == Op::Exec {
             return self.exec(inp);
@@ -327,14 +331,15 @@ impl Processor {
         if mode == ContentMode::Ignore {
             return false;
         }
-        // Gerätedateien, Pipes, Sockets haben keinen Inhalt, den man überwachen könnte
-        // (jedes „> /dev/null“ wäre sonst ein MODIFY)
+        // Device files, pipes, sockets have no content that could be monitored
+        // (otherwise every “> /dev/null” would be a MODIFY)
         if is_special(&inp.path) {
             return false;
         }
-        // Heiße Verzeichnisse (Sessions, Caches): nur Code-Dateien in Echtzeit,
-        // der Rest kommt über den nächsten Scan. Scan selbst wird nie gedrosselt.
-        // Herkunft bzgl. Paketverwaltung – dieselbe Prüfung wie für Einzel-Ereignisse (unten), auch für das Sammel-Ereignis
+        // Hot directories (sessions, caches): only code files in real time,
+        // the rest comes via the next scan. The scan itself is never throttled.
+        // Origin with respect to package management – the same check as for individual events (below), also for the
+        // aggregate event
         let origin = if procinfo::is_package_manager(inp.proc.as_ref()) {
             PkgOrigin::Pm
         } else if self.pkg_window.applies(&inp.path, self.known_or_pkg_temp(&inp.path), inp.proc.as_ref()) {
@@ -343,7 +348,7 @@ impl Processor {
             PkgOrigin::None
         };
         if origin == PkgOrigin::Pm {
-            self.pkg_window.saw_pm(); // hält das Paket-Update-Fenster offen (auch für gedrosselte Ereignisse)
+            self.pkg_window.saw_pm(); // keeps the package update window open (also for throttled events)
         }
         if inp.backend != Backend::Scan && inp.op != Op::Overflow {
             match self.hot_check(&inp.path, origin) {
@@ -413,14 +418,14 @@ impl Processor {
             notes.push("proc_gone".into());
         }
         if origin == PkgOrigin::Pm {
-            // Programmdatei geprüft (root-eigenes Paketprogramm), nicht nur der Name
+            // executable verified (root-owned package program), not just the name
             notes.push("pkg".into());
         } else if origin == PkgOrigin::Window || (inp.op == Op::Overflow && self.pkg_window.active()) {
-            // ohne (vollständige) Prozess-Zuordnung: zeitliche Korrelation mit dpkg/rpm/apk-Aktivität – auch bei
-            // fanotify, denn kurzlebige dpkg-Helfer (mv, tzdata.postinst) sind beim Auswerten oft schon beendet und der
-            // Nachscan nach einem Warteschlangen-Überlauf hat gar keinen Prozess (Testlauf: apt-get upgrade).
-            // Manipulierte Programme fallen trotzdem auf: Abgleich mit den offiziellen Paket-Hashes (refcheck).
-            // Seit H5 nur ohne lebende Prozess-Zuordnung, nur bei echtem Paketmanager, nie für Persistenzpfade.
+            // without (complete) process mapping: temporal correlation with dpkg/rpm/apk activity – also with
+            // fanotify, because short-lived dpkg helpers (mv, tzdata.postinst) have often already exited at evaluation time
+            // and the rescan after a queue overflow has no process at all (test run: apt-get upgrade).
+            // Tampered programs are still detected: comparison with the official package hashes (refcheck).
+            // Since H5 only without a live process mapping, only for a real package manager, never for persistence paths.
             notes.push("pkg".into());
             notes.push("pkg_window".into());
         }
@@ -430,11 +435,11 @@ impl Processor {
         let prev = self.state.get(&inp.path);
 
         let Some(meta) = FileMeta::from_path(&inp.path) else {
-            // Datei existiert nicht (mehr)
-            // Kurzlebige Temp-Dateien (mktemp, curl, Paketmanager, Datenbanken): angelegt und schon wieder weg, nie
-            // vorher gesehen – kein Befund, nur Lärm (Praxisfall: tausende je Stunde). Startet der Prozess selbst aus
-            // einem Temp-Verzeichnis, bleibt es bei der Meldung.
-            // ebenso das Löschen einer nie gemeldeten Temp-Datei
+            // File does not exist (any more)
+            // Short-lived temp files (mktemp, curl, package managers, databases): created and already gone, never
+            // seen before – not a finding, just noise (real case: thousands per hour). If the process itself starts from
+            // a temp directory, it is still reported.
+            // likewise the deletion of a never-reported temp file
             if matches!(inp.op, Op::Create | Op::Modify | Op::Attrib | Op::Delete)
                 && prev.is_none()
                 && is_temp_path(&inp.path)
@@ -458,15 +463,15 @@ impl Processor {
             return true;
         };
         if ev.op == Op::Delete {
-            // Datei wurde gelöscht und neu angelegt (Temp+Rename-Muster)
+            // File was deleted and recreated (temp+rename pattern)
             ev.op = Op::Modify;
             notes.push("recreated".into());
         }
         let is_reg = meta.mode & libc::S_IFMT == libc::S_IFREG;
         let is_link = meta.mode & libc::S_IFMT == libc::S_IFLNK;
-        // Leere, nicht ausführbare neue Datei in einem Temp-Verzeichnis (mktemp): weder melden noch vermerken. Bekommt
-        // sie Inhalt und bleibt bestehen, kommt sie mit dem Schreiben als neue Datei; wird sie gleich wieder gelöscht,
-        // entfällt auch das (Praxisfall: ein Monitoring-Cronjob mit mktemp + curl, ~30 000 Meldungen am Tag).
+        // Empty, non-executable new file in a temp directory (mktemp): neither report nor record. If it
+        // gets content and persists, it arrives with the write as a new file; if it is deleted right away,
+        // that is dropped too (real case: a monitoring cron job with mktemp + curl, ~30 000 reports a day).
         if ev.op == Op::Create
             && prev.is_none()
             && is_reg
@@ -502,7 +507,7 @@ impl Processor {
                     let base = prev.as_ref().and_then(|p| p.stored);
                     ev.base_hash = base.as_ref().map(hx);
                     if base.as_ref() == Some(sh) && !unchanged && prev.is_some() {
-                        // Nur maskierte Werte (z. B. Passwort) geändert: melden, ohne Wert
+                        // Only masked values (e.g. password) changed: report, without the value
                         notes.push("secret_value_changed".into());
                     }
                     if base.as_ref() != Some(sh) {
@@ -538,8 +543,8 @@ impl Processor {
                         if self.state.blob_put(sh, data) {
                             stored_hash = Some(*sh);
                         } else {
-                            // Budget erschöpft: keine Basis für den nächsten Diff
-                            // (im Produkt: Basis bei der Zentrale anfordern)
+                            // Budget exhausted: no base for the next diff
+                            // (in the product: request the base from the central server)
                             notes.push("cache_full".into());
                             self.stats.lock().unwrap().cache_full += 1;
                             stored_hash = None;
@@ -570,8 +575,9 @@ impl Processor {
         if meta.caps.is_some() {
             notes.push("file_caps".into());
         }
-        // ohne geprüften Paketprozess bzw. Update-Fenster: neue/geänderte Systemdatei mit der Paketdatenbank abgleichen
-        // (z. B. erst vom periodischen Scan nach einem automatischen Update gefunden)
+        // without a verified package process or update window: compare a new/changed system file with the package
+        // database
+        // (e.g. only found by the periodic scan after an automatic update)
         if is_reg
             && matches!(ev.op, Op::Create | Op::Modify | Op::Rename)
             && !notes.iter().any(|n| n == "pkg")
@@ -584,13 +590,14 @@ impl Processor {
         ev.meta = Some(meta);
         ev.note = join(notes);
         if ev.op == Op::WriteNochange && (inp.quiet_nochange || !crate::policy::Policy::nochange_relevant(&inp.path)) {
-            return false; // Zustand ist aktualisiert, kein Ereignis (nur Zeitstempel bzw. unkritische Datei)
+            return false; // state is updated, no event (only timestamps or a non-critical file)
         }
         self.finish(ev);
         true
     }
 
-    /// Probelauf „Schutz in Echtzeit“: Programmstart melden (mit Prüfsumme der Programmdatei), Zustand bleibt unberührt
+    /// Trial run “real-time protection”: report program start (with checksum of the executable), state stays
+    /// untouched
     fn exec(&self, inp: Input) -> bool {
         const MAX_HASH: u64 = 64 << 20;
         let meta = FileMeta::from_path(&inp.path);
@@ -647,7 +654,7 @@ fn link_target(path: &str) -> Option<String> {
     std::fs::read_link(path).ok().map(|t| t.to_string_lossy().into_owned())
 }
 
-/// „Hash“ eines Symlinks = Hash seines Ziels.
+/// “Hash” of a symlink = hash of its target.
 fn link_hash(target: &str) -> [u8; 32] {
     hash_from_hex(&hash::hash_bytes(Algo::Sha256, format!("link:{target}").as_bytes()))
 }
@@ -682,22 +689,22 @@ mod tests {
                 emitted += 1;
             }
         }
-        // 200 normal + 1 Herabstufungs-Meldung, danach still
+        // 200 normal + 1 downgrade report, silent afterwards
         assert_eq!(emitted, HOT_PER_MIN as usize + 1);
         assert!(p.stats.lock().unwrap().hot_skipped >= 99);
-        // Code-Datei im selben Verzeichnis wird weiter verarbeitet
+        // Code file in the same directory is still processed
         assert!(p.process(input("/srv/hot/shell.php")));
         let log = std::fs::read_to_string(dir.path().join("e.jsonl")).unwrap();
         assert!(log.contains("hot_dir_downgraded"));
-        // PHP-Steuerdatei, SSH-Schlüssel und Templates zählen als Code
+        // PHP control file, SSH keys and templates count as code
         for f in [".user.ini", "authorized_keys", "shop.twig", "header.tpl"] {
             assert!(p.process(input(&format!("/srv/hot/{f}"))), "{f}");
         }
-        // Nachscan des Ordners ist vorgemerkt (fällig nach Ende der Herabstufung)
+        // Rescan of the directory is scheduled (due after the downgrade ends)
         assert!(p.take_due_rescans().is_empty());
         p.hot_rescan.lock().unwrap().values_mut().for_each(|u| *u = Instant::now());
         assert_eq!(p.take_due_rescans(), vec!["/srv/hot".to_string()]);
-        assert!(p.take_due_rescans().is_empty(), "nur einmal");
+        assert!(p.take_due_rescans().is_empty(), "only once");
     }
 
     #[test]
@@ -710,7 +717,7 @@ mod tests {
         let st = State::open(&dir.path().join("s.redb").to_string_lossy(), 4, 1 << 20).unwrap();
         let evs = Arc::new(Mutex::new(Vec::new()));
         let p = Processor::new(Arc::new(Policy::default_policy()), st, Box::new(Collect(evs.clone())), Algo::Sha256);
-        // ein Build schreibt .js-Dateien (Code) in viele Unterordner
+        // a build writes .js files (code) into many subdirectories
         let mut emitted = 0;
         for i in 0..600 {
             let sub = ["server/app", "server/chunks/ssr", "static/chunks", "static/css"][i % 4];
@@ -718,16 +725,16 @@ mod tests {
                 emitted += 1;
             }
         }
-        assert_eq!(emitted, HOT_PER_MIN as usize + 1, "200 einzeln + 1 Sammelmeldung, danach still – auch für Code");
+        assert_eq!(emitted, HOT_PER_MIN as usize + 1, "200 individually + 1 summary report, then silent – also for code");
         let evs = evs.lock().unwrap();
         let hot: Vec<_> = evs.iter().filter(|e| e.note.as_deref().is_some_and(|n| n.starts_with("hot_dir_downgraded"))).collect();
         assert_eq!(hot.len(), 1);
         assert_eq!(hot[0].path, "/srv/app/.next");
         assert!(hot[0].note.as_deref().unwrap().contains("build_output"));
-        // kein Nachscan der Build-Ausgabe
+        // no rescan of the build output
         p.hot_rescan.lock().unwrap().values_mut().for_each(|u| *u = Instant::now());
         assert!(p.take_due_rescans().is_empty());
-        // Code außerhalb der Build-Ausgabe im selben Projekt wird weiter einzeln gemeldet
+        // Code outside the build output in the same project is still reported individually
         drop(evs);
         assert!(p.process(input("/srv/app/public/shell.php")));
     }
@@ -739,7 +746,8 @@ mod tests {
         }
     }
 
-    /// Sammel-Ereignis „heißer Ordner“ trägt `pkg` nur, wenn alle Schreibzugriffe vom **geprüften** Paketmanager kamen
+    /// Aggregate event “hot directory” carries `pkg` only if all write accesses came from the **verified**
+    /// package manager
     #[test]
     fn hot_dir_event_carries_verified_pkg_marker() {
         let proc = |name: &str, pkg: bool| ProcInfo { pid: 4242, exe: Some(format!("/usr/bin/{name}")), comm: Some(name.into()), chain: vec![name.into()], gone: false, pkg };
@@ -757,17 +765,17 @@ mod tests {
             hot[0].note.clone()
         };
         let has_pkg = |n: &Option<String>| n.as_deref().unwrap().split(',').any(|x| x == "pkg");
-        // echter (geprüfter) dpkg
+        // real (verified) dpkg
         let n = run(&|_| Some(proc("dpkg", true)));
         assert!(has_pkg(&n), "{n:?}");
         assert!(!n.as_deref().unwrap().contains("pkg_window"));
-        // Webshell nennt sich „dpkg“ – Name allein zählt nicht
+        // Webshell calls itself “dpkg” – the name alone does not count
         assert!(!has_pkg(&run(&|_| Some(proc("dpkg", false)))));
-        // ein fremder Schreiber im selben Fenster (letzter Zugriff, der die Herabstufung auslöst) nimmt die Markierung weg
+        // a foreign writer in the same window (last access, which triggers the downgrade) removes the marker
         assert!(!has_pkg(&run(&|i| Some(proc(if i == HOT_PER_MIN as usize { "php-fpm" } else { "dpkg" }, i != HOT_PER_MIN as usize)))));
-        // … ebenso mittendrin
+        // … likewise in the middle
         assert!(!has_pkg(&run(&|i| Some(proc("dpkg", i != 17)))));
-        // ohne Prozess und ohne Paket-Update-Fenster: keine Markierung
+        // without a process and without a package update window: no marker
         assert!(!has_pkg(&run(&|_| None)));
     }
 
@@ -789,10 +797,10 @@ mod tests {
         let c = String::from_utf8(ev.content.unwrap()).unwrap();
         assert!(!c.contains("geheim") && c.contains("name: shop"), "{c}");
         assert!(ev.note.unwrap_or_default().contains("redacted"));
-        // Roh-Hash (nicht der maskierte) ist für die Wiederherstellung gemerkt
+        // Raw hash (not the masked one) is remembered for the restore
         let h = hash_from_hex(&hash::hash_bytes(Algo::Sha256, raw));
         assert!(st.seen_hash(&path, &h));
-        // Symlink wird nie als Inhalt gelesen
+        // Symlink is never read as content
         let l = root.join("link.yml");
         std::os::unix::fs::symlink("/etc/hostname", &l).unwrap();
         assert!(p.process(Input { op: Op::Create, ..input(&l.to_string_lossy()) }));
@@ -812,35 +820,35 @@ mod tests {
         i.op = Op::Create;
         assert!(!p.process(i));
         assert_eq!(p.stats.lock().unwrap().temp_gone, 1);
-        // außerhalb von Temp-Verzeichnissen bleibt „angelegt und wieder weg“ eine Meldung
+        // outside of temp directories “created and gone again” remains a report
         let mut i = input("/var/www/tyrosec-test-gone-0815.php");
         i.op = Op::Create;
         assert!(p.process(i));
-        // mktemp + curl: leere Datei anlegen, beschreiben, löschen – nichts zu melden
+        // mktemp + curl: create empty file, write to it, delete it – nothing to report
         let tmp = tempfile::Builder::new().prefix("tmp.").tempfile_in("/tmp").unwrap();
         let path = tmp.path().to_string_lossy().into_owned();
         let mut c = input(&path);
         c.op = Op::Create;
-        assert!(!p.process(c), "leer, nicht ausführbar: nicht melden");
+        assert!(!p.process(c), "empty, not executable: do not report");
         std::fs::write(&path, b"<html>ok</html>").unwrap();
-        drop(tmp); // gelöscht, bevor das Schreiben verarbeitet ist
+        drop(tmp); // deleted before the write is processed
         let mut m = input(&path);
         m.op = Op::Modify;
-        assert!(!p.process(m), "nie gemeldet und schon weg");
+        assert!(!p.process(m), "never reported and already gone");
         let mut d = input(&path);
         d.op = Op::Delete;
-        assert!(!p.process(d), "Löschen einer nie gemeldeten Temp-Datei");
-        // ausführbare leere Datei in /tmp bleibt sichtbar
+        assert!(!p.process(d), "deletion of a never reported temp file");
+        // executable empty file in /tmp stays visible
         let x = tempfile::Builder::new().prefix("tmp.").tempfile_in("/tmp").unwrap();
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(x.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         let mut e = input(&x.path().to_string_lossy());
         e.op = Op::Create;
-        assert!(p.process(e), "ausführbar: melden");
+        assert!(p.process(e), "executable: report");
     }
 }
 
-/// Zeichen-/Blockgerät, FIFO oder Socket (nicht Symlinks folgen; gelöschte Pfade → false).
+/// Character/block device, FIFO or socket (does not follow symlinks; deleted paths → false).
 pub fn is_special(path: &str) -> bool {
     use std::os::unix::fs::FileTypeExt;
     match std::fs::symlink_metadata(path) {
@@ -858,7 +866,7 @@ mod special_tests {
     fn dev_null_is_special() {
         assert!(super::is_special("/dev/null"));
         assert!(!super::is_special("/etc/hostname"));
-        assert!(!super::is_special("/gibt/es/nicht"));
+        assert!(!super::is_special("/does/not/exist"));
     }
 
 }

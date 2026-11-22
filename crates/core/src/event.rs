@@ -12,7 +12,7 @@ pub enum Op {
     Attrib,
     WriteNochange,
     Overflow,
-    /// Programmstart aus einem Ort, an dem ein scharfer Schutz ihn verhindert hätte (Probelauf, nur gemeldet)
+    /// Program start from a location where enforcing protection would have prevented it (dry run, only reported)
     Exec,
 }
 
@@ -24,7 +24,7 @@ pub enum Backend {
     Scan,
 }
 
-/// Rohereignis eines Backends, vor Debounce und Inhaltsverarbeitung.
+/// Raw event from a backend, before debounce and content processing.
 #[derive(Clone, Debug)]
 pub struct RawEvent {
     pub ts_ns: i64,
@@ -36,12 +36,12 @@ pub struct RawEvent {
     pub note: Option<String>,
 }
 
-/// Ausgabeereignis (eine JSON-Zeile in events.jsonl). Format ist mit
-/// `ci/spike/tests/compare.py` abgestimmt.
+/// Output event (one JSON line in events.jsonl). The format is aligned with
+/// `ci/spike/tests/compare.py`.
 #[derive(Serialize, Clone, Debug)]
 pub struct Event {
     pub ts_ns: i64,
-    /// Zeitpunkt des ersten Rohereignisses (für Latenzmessung).
+    /// Time of the first raw event (for latency measurement).
     pub first_ts_ns: i64,
     pub backend: Backend,
     pub op: Op,
@@ -58,16 +58,16 @@ pub struct Event {
     pub diff_bytes: Option<u32>,
     pub meta: Option<FileMeta>,
     pub note: Option<String>,
-    /// Nur Spike (`--emit-diff`): Diff-Text, gekürzt.
+    /// Spike only (`--emit-diff`): diff text, truncated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub diff: Option<String>,
-    /// Für die Zentrale (nicht im JSON): Patch gegen `base_hash` …
+    /// For the central server (not in the JSON): patch against `base_hash` …
     #[serde(skip)]
     pub patch: Option<Vec<u8>>,
-    /// … oder voller (ggf. maskierter) Inhalt, wenn keine Basis existiert
+    /// … or full (possibly masked) content if no base exists
     #[serde(skip)]
     pub content: Option<Vec<u8>>,
-    /// Hash der gespeicherten Fassung nach der Änderung (Hex)
+    /// Hash of the stored version after the change (hex)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stored_hash: Option<String>,
 }
@@ -81,7 +81,7 @@ pub struct FileMeta {
     pub ino: u64,
     pub mtime_ns: i64,
     pub ctime_ns: i64,
-    /// Hex des xattr `security.capability`, falls vorhanden.
+    /// Hex of the xattr `security.capability`, if present.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub caps: Option<String>,
 }
@@ -107,12 +107,12 @@ impl FileMeta {
     }
 }
 
-/// Liest das xattr `security.capability` (File-Capabilities).
+/// Reads the xattr `security.capability` (file capabilities).
 pub fn read_caps(path: &str) -> Option<String> {
     let c_path = std::ffi::CString::new(path).ok()?;
     let name = c"security.capability";
     let mut buf = [0u8; 64];
-    // SAFETY: Puffer und Strings sind gültig für die Dauer des Aufrufs.
+    // SAFETY: buffers and strings are valid for the duration of the call.
     let n = unsafe {
         libc::lgetxattr(
             c_path.as_ptr(),

@@ -1,10 +1,10 @@
-//! Abgleich-Scan: findet alles, was Events verpasst haben (Ausfallzeiten,
-//! mmap, NFS, Timestomping). Vergleicht size/mtime/ctime/inode/mode/uid/gid,
-//! bei Abweichung Hash. Gedrosselt (IO-Klasse idle, Ratenlimit), parallel,
-//! fortsetzbar.
+//! Reconciliation scan: finds everything events have missed (downtime,
+//! mmap, NFS, timestomping). Compares size/mtime/ctime/inode/mode/uid/gid,
+//! hashes on mismatch. Throttled (IO class idle, rate limit), parallel,
+//! resumable.
 //!
-//! Speicher: Die Dateiliste wird gestreamt (kein Vektor aller Pfade); der
-//! Zustand liegt im `State` (eingebettete Datenbank) des Processors.
+//! Memory: the file list is streamed (no vector of all paths); the
+//! state lives in the processor's `State` (embedded database).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -20,12 +20,12 @@ use tyrosd_core::processor::{Input, Processor};
 pub struct ScanConfig {
     pub roots: Vec<String>,
     pub threads: usize,
-    /// MB/s Lese-Limit (None = unbegrenzt)
+    /// MB/s read limit (None = unlimited)
     pub rate_mb_s: Option<u64>,
-    /// IO-Priorität „idle“ + nice 10
+    /// IO priority "idle" + nice 10
     pub low_prio: bool,
     pub one_fs: bool,
-    /// Alle Dateien neu hashen, nicht nur bei Metadaten-Abweichung
+    /// Rehash all files, not only on metadata mismatch
     pub full_hash: bool,
 }
 
@@ -45,9 +45,9 @@ pub struct ScanReport {
 }
 
 fn set_low_prio() {
-    // ioprio_set(IOPRIO_WHO_PROCESS, 0 = aufrufender Thread, CLASS_IDLE << 13)
+    // ioprio_set(IOPRIO_WHO_PROCESS, 0 = calling thread, CLASS_IDLE << 13)
     const IOPRIO_CLASS_IDLE: libc::c_long = 3;
-    // SAFETY: einfache Syscalls ohne Zeiger.
+    // SAFETY: simple syscalls without pointers.
     unsafe {
         libc::syscall(libc::SYS_ioprio_set, 1 as libc::c_long, 0 as libc::c_long, IOPRIO_CLASS_IDLE << 13);
         libc::setpriority(libc::PRIO_PROCESS, 0, 10);
@@ -85,7 +85,7 @@ fn changed(a: &FileMeta, b: &FileMeta) -> bool {
         || a.caps != b.caps
 }
 
-/// Zustand dauerhaft sichern (z. B. beim Stoppen des Agents).
+/// Persist the state (e.g. when the agent stops).
 pub fn save_state(proc: &Processor, complete: bool) -> Result<u64> {
     if complete {
         proc.state.set_complete(true)?;
@@ -126,7 +126,7 @@ pub fn scan(cfg: &ScanConfig, proc: &Processor) -> Result<ScanReport> {
             .same_file_system(cfg.one_fs)
             .follow_links(false)
             .into_iter()
-            // ignorierte Verzeichnisse gar nicht erst betreten
+            // do not even enter ignored directories
             .filter_entry(|e| {
                 !(e.file_type().is_dir()
                     && policy.mode_for(&format!("{}/.x", e.path().to_string_lossy().trim_end_matches('/'))) == ContentMode::Ignore)
@@ -158,10 +158,10 @@ pub fn scan(cfg: &ScanConfig, proc: &Processor) -> Result<ScanReport> {
                         return;
                     }
                     if prev.is_none() && baseline {
-                        proc.prime(&p); // Baseline: nur aufnehmen, kein Event
+                        proc.prime(&p); // baseline: record only, no event
                     } else {
-                        // Modify vs. Attrib vs. WriteNochange entscheidet der Processor über den Hash;
-                        // reine Zeitstempel-Änderungen werden still übernommen.
+                        // Modify vs. Attrib vs. WriteNochange is decided by the processor via the hash;
+                        // pure timestamp changes are adopted silently.
                         let op = if prev.is_none() { Op::Create } else { Op::Modify };
                         let emitted = proc.process(Input {
                             ts_ns: tyrosd_core::now_ns(),
@@ -187,7 +187,7 @@ pub fn scan(cfg: &ScanConfig, proc: &Processor) -> Result<ScanReport> {
         });
     }
 
-    // Gelöschte Dateien: bekannte Pfade unter den Wurzeln, die es nicht mehr gibt
+    // Deleted files: known paths under the roots that no longer exist
     if !baseline {
         for root in &cfg.roots {
             for p in proc.state.missing_under(root)? {

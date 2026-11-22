@@ -1609,6 +1609,7 @@ dependencies = [
 name = "tyrosd-source-weblog"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "regex",
  "serde_json",
  "tyrosd-proto",

@@ -1,14 +1,14 @@
-//! Beaconing-Stichprobe: alle 30 s die
-//! Verbindungstabelle lesen, **neue** ausgehende Verbindungen zu öffentlichen Adressen je (Prozess, Ziel, Port) als
-//! Minute der laufenden Stunde vermerken (Bitfeld). Die abgeschlossene Stunde geht mit der Bestandsaufnahme an die
-//! Zentrale, die dort regelmäßige Kontakte sucht. Nur lesen; die Zuordnung Socket → Prozess (Durchlauf über /proc/*/fd)
-//! nur, wenn es neue Verbindungen gibt.
+//! Beaconing sample: every 30 s read the
+//! connection table and record **new** outgoing connections to public addresses per (process, destination, port) as
+//! the minute of the current hour (bit field). The completed hour goes with the inventory to the
+//! server, which looks for regular contacts there. Read only; mapping socket → process (scan over /proc/*/fd)
+//! only when there are new connections.
 //!
-//! Kurze Verbindungen (typischer HTTP-Beacon: 0,2–2 s) sähe eine reine Stichprobe nur selten. Darum zählt auch
-//! TIME_WAIT mit: nach dem Schließen durch den Client bleibt die Verbindung 60 s in der Tabelle – bei 30 s Abstand
-//! wird so jede vom Client beendete Verbindung gesehen. Eine Verbindung ist das Tupel (lokaler Port, Ziel, Ziel-Port);
-//! TIME_WAIT-Einträge haben keinen Socket mehr – der Prozess kommt dann aus einer früheren Sichtung derselben
-//! Verbindung bzw. desselben Ziels in dieser Stunde, sonst „?“.
+//! A pure sample would rarely see short connections (typical HTTP beacon: 0.2–2 s). Therefore TIME_WAIT
+//! counts too: after the client closes it, the connection stays in the table for 60 s – with a 30 s interval
+//! every connection closed by the client is seen. A connection is the tuple (local port, destination, dest. port);
+//! TIME_WAIT entries no longer have a socket – the process then comes from an earlier sighting of the same
+//! connection or the same destination in this hour, otherwise "?".
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::net::IpAddr;
@@ -16,7 +16,7 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 
-/// höchstens so viele Ziele je Stunde (Rest wird gezählt, aber nicht einzeln gemeldet)
+/// at most this many destinations per hour (the rest is counted but not reported individually)
 pub const MAX_KEYS: usize = 500;
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -25,32 +25,32 @@ pub struct BeaconItem {
     pub exe: String,
     pub remote: String,
     pub port: u16,
-    /// Bit m = in Minute m der Stunde begann mindestens eine neue Verbindung
+    /// Bit m = at least one new connection started in minute m of the hour
     pub minutes: u64,
-    /// neue Verbindungen in der Stunde
+    /// new connections in the hour
     pub conns: u32,
-    /// per DNS erfragter Name des Ziels (ab 0.5.5, leer wenn unbekannt)
+    /// name of the destination as queried via DNS (since 0.5.5, empty if unknown)
     #[serde(skip_serializing_if = "String::is_empty")]
     pub name: String,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 pub struct BeaconHour {
-    /// Beginn der Stunde (Unix-Sekunden, auf volle Stunde)
+    /// Start of the hour (Unix seconds, on the full hour)
     pub hour: u64,
     pub items: Vec<BeaconItem>,
-    /// Ziele über MAX_KEYS (nicht einzeln gemeldet)
+    /// Destinations beyond MAX_KEYS (not reported individually)
     pub dropped: u32,
 }
 
-/// zuletzt abgeschlossene Stunde (liest die Bestandsaufnahme)
+/// last completed hour (read by the inventory)
 static LAST: Mutex<Option<BeaconHour>> = Mutex::new(None);
 
 pub fn last_hour() -> Option<BeaconHour> {
     LAST.lock().ok()?.clone()
 }
 
-/// öffentliche Adresse? (privat, Loopback, Link-Local, CGNAT, ULA … zählen nicht)
+/// public address? (private, loopback, link-local, CGNAT, ULA … do not count)
 pub fn is_public(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(a) => {
@@ -68,29 +68,29 @@ pub fn is_public(ip: &IpAddr) -> bool {
     }
 }
 
-/// Abstand der Stichproben (TIME_WAIT hält beendete Verbindungen 60 s – 30 s Abstand sieht jede)
+/// Sampling interval (TIME_WAIT keeps closed connections for 60 s – a 30 s interval sees each one)
 pub const INTERVAL_S: u64 = 30;
 
-/// Verbindung: (lokaler Port, Ziel, Ziel-Port)
+/// Connection: (local port, destination, destination port)
 type Ident = (u16, IpAddr, u16);
 
 #[derive(Default)]
 pub struct Sampler {
-    /// bekannte Verbindungen mit ihrem Prozess – nur neue zählen
+    /// known connections with their process – only new ones count
     seen: HashMap<Ident, (String, String)>,
-    /// Ziel → zuletzt gesehener Prozess (für TIME_WAIT-Einträge ohne Socket)
+    /// destination → last seen process (for TIME_WAIT entries without a socket)
     by_target: HashMap<(IpAddr, u16), (String, String)>,
     hour: u64,
     cur: BTreeMap<(String, String, String, u16), (u64, u32, String)>,
     dropped: u32,
 }
 
-/// Verbindung aus der Tabelle: (Inode – 0 bei TIME_WAIT, Ziel, Ziel-Port, lokaler Port)
+/// Connection from the table: (inode – 0 for TIME_WAIT, destination, destination port, local port)
 pub type Row = (u64, IpAddr, u16, u16);
 
 impl Sampler {
-    /// Eine Stichprobe. `resolve` ordnet neue Inodes Prozessen zu (Name, Programm) – wird nur bei neuen Verbindungen
-    /// aufgerufen. Liefert die abgeschlossene Stunde, wenn eine neue begonnen hat.
+    /// One sample. `resolve` maps new inodes to processes (name, program) – called only when there are new
+    /// connections. Returns the completed hour when a new one has started.
     pub fn observe(&mut self, now: u64, rows: &[Row], listening: &HashSet<u16>, resolve: impl FnOnce(&[u64]) -> HashMap<u64, (String, String)>) -> Option<BeaconHour> {
         let hour = now - now % 3600;
         let mut done = None;
@@ -103,8 +103,8 @@ impl Sampler {
         let minute = (now % 3600) / 60;
         let out: Vec<&Row> = rows.iter().filter(|(_, ip, _, lport)| is_public(ip) && !listening.contains(lport)).collect();
         let ident = |r: &Row| -> Ident { (r.3, r.1, r.2) };
-        // nicht mehr vorhandene Verbindungen vergessen (die Menge bleibt klein; ein später wiederverwendeter lokaler
-        // Port zählt dann als neue Verbindung)
+        // forget connections that no longer exist (the set stays small; a local port reused later
+        // then counts as a new connection)
         let present: HashSet<Ident> = rows.iter().map(ident).collect();
         self.seen.retain(|k, _| present.contains(k));
         let new: Vec<&Row> = out.iter().copied().filter(|r| !self.seen.contains_key(&ident(r))).collect();
@@ -153,9 +153,9 @@ impl Sampler {
     }
 }
 
-/// Stichprobe aus dem echten System (Verbindungstabelle + Prozesse)
+/// Sample from the real system (connection table + processes)
 pub fn sample(s: &mut Sampler, now: u64) {
-    // 01 ESTABLISHED, 02 SYN_SENT, 06 TIME_WAIT (vom Client beendet, 60 s sichtbar)
+    // 01 ESTABLISHED, 02 SYN_SENT, 06 TIME_WAIT (closed by the client, visible for 60 s)
     let rows: Vec<Row> = crate::net::with_states(&["01", "02", "06"]).into_iter().map(|c| (c.inode, c.raddr, c.rport, c.lport)).collect();
     let listening = crate::net::listening_ports();
     let done = s.observe(now, &rows, &listening, |new| {
@@ -199,18 +199,18 @@ mod tests {
     fn counts_new_outgoing_connections_per_minute_and_rolls_hours() {
         let mut s = Sampler::default();
         let listen: HashSet<u16> = [443].into();
-        let h0 = 1_795_100_400; // volle Stunde
+        let h0 = 1_795_100_400; // full hour
         let who = |new: &[u64]| new.iter().map(|i| (*i, ("curl".to_string(), "/usr/bin/curl".to_string()))).collect();
-        // Minute 0: neue Verbindung nach außen; eingehende (lokaler Port 443) und private zählen nicht
+        // Minute 0: new outgoing connection; incoming (local port 443) and private ones do not count
         let rows = vec![(1, ip("91.92.93.9"), 443, 51000), (2, ip("91.92.93.10"), 51234, 443), (3, ip("10.0.0.2"), 3306, 52000)];
         assert!(s.observe(h0 + 5, &rows, &listen, who).is_none());
-        // dieselbe Verbindung 15 s später: nicht neu
-        s.observe(h0 + 20, &rows, &listen, |_| panic!("keine neue Verbindung – nichts auflösen"));
-        // Minute 5 und 10: neue Verbindungen zum selben Ziel
+        // the same connection 15 s later: not new
+        s.observe(h0 + 20, &rows, &listen, |_| panic!("no new connection – nothing to resolve"));
+        // Minutes 5 and 10: new connections to the same destination
         s.observe(h0 + 300, &[(4, ip("91.92.93.9"), 443, 51001)], &listen, who);
         s.observe(h0 + 600, &[(5, ip("91.92.93.9"), 443, 51002)], &listen, who);
-        // nächste Stunde → abgeschlossene Stunde wird geliefert
-        let done = s.observe(h0 + 3600 + 1, &[], &listen, who).expect("Stunde abgeschlossen");
+        // next hour → the completed hour is returned
+        let done = s.observe(h0 + 3600 + 1, &[], &listen, who).expect("hour completed");
         assert_eq!(done.hour, h0);
         assert_eq!(done.items.len(), 1);
         let it = &done.items[0];
@@ -237,14 +237,14 @@ mod tests {
         let h0 = 1_795_100_400;
         let none = HashSet::new();
         let who = |new: &[u64]| new.iter().map(|i| (*i, ("curl".to_string(), "/usr/bin/curl".to_string()))).collect();
-        // Minute 0: Verbindung offen gesehen (Socket 7) → Prozess bekannt
+        // Minute 0: connection seen open (socket 7) → process known
         s.observe(h0, &[(7, ip("91.92.93.9"), 443, 50000)], &none, who);
-        // 30 s später: dieselbe Verbindung in TIME_WAIT (Socket 0) – nicht neu
-        s.observe(h0 + 30, &[(0, ip("91.92.93.9"), 443, 50000)], &none, |_| panic!("nicht neu"));
-        // Minute 5: kurze Verbindung nur noch als TIME_WAIT gesehen → Prozess aus früherer Sichtung desselben Ziels
-        s.observe(h0 + 300, &[(0, ip("91.92.93.9"), 443, 50011)], &none, |_| panic!("kein Socket – nichts auflösen"));
-        // unbekanntes Ziel nur als TIME_WAIT → Prozess „?“
-        s.observe(h0 + 330, &[(0, ip("91.92.93.50"), 8443, 50012)], &none, |_| panic!("kein Socket"));
+        // 30 s later: the same connection in TIME_WAIT (socket 0) – not new
+        s.observe(h0 + 30, &[(0, ip("91.92.93.9"), 443, 50000)], &none, |_| panic!("not new"));
+        // Minute 5: short connection seen only as TIME_WAIT → process from an earlier sighting of the same destination
+        s.observe(h0 + 300, &[(0, ip("91.92.93.9"), 443, 50011)], &none, |_| panic!("no socket – nothing to resolve"));
+        // unknown destination only as TIME_WAIT → process "?"
+        s.observe(h0 + 330, &[(0, ip("91.92.93.50"), 8443, 50012)], &none, |_| panic!("no socket"));
         let done = s.observe(h0 + 3600, &[], &none, |_| HashMap::new()).unwrap();
         let curl = done.items.iter().find(|i| i.remote == "91.92.93.9").unwrap();
         assert_eq!((curl.process.as_str(), curl.conns, curl.minutes), ("curl", 2, 1 | (1 << 5)));

@@ -1,14 +1,14 @@
-//! SSH-Anmeldungen (Hauptplan 22, Phase 1).
+//! SSH logins (main plan 22, phase 1).
 //!
-//! Quellen, ohne zusätzliche Software:
-//! - systemd-Journal über `journalctl -f -o json` (vorhanden auf systemd-Systemen)
-//! - sonst `/var/log/auth.log` (Debian/Ubuntu) bzw. `/var/log/secure` (RHEL); dort ist das Programmfeld
-//!   fälschbar (`logger -t sshd[…]`) – Anmeldungen von dort sind immer `service` = „ssh_unverified“; Zeilen,
-//!   deren PID einem fremden Prozess gehört (`SshdCheck`), werden verworfen
+//! Sources, without additional software:
+//! - systemd journal via `journalctl -f -o json` (present on systemd systems)
+//! - otherwise `/var/log/auth.log` (Debian/Ubuntu) or `/var/log/secure` (RHEL); there the program field
+//!   can be forged (`logger -t sshd[…]`) – logins from there always have `service` = "ssh_unverified"; lines
+//!   whose PID belongs to a foreign process (`SshdCheck`) are discarded
 //!
-//! Erfolgreiche Logins werden sofort gemeldet; Fehlversuche je Quell-IP in
-//! Fenstern (Standard 5 min) zusammengefasst – Brute-Force-Wellen sind
-//! Dauerzustand und kein Einzelalarm wert (24.9).
+//! Successful logins are reported immediately; failed attempts per source IP are
+//! aggregated in windows (default 5 min) – brute-force waves are a
+//! permanent condition and not worth an individual alarm (24.9).
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
@@ -26,8 +26,8 @@ fn now_ns() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as i64).unwrap_or(0)
 }
 
-// Sicherheitsprüfung H1: Ausdrücke am Anfang und Ende verankert; der Benutzername ist gierig (`.+`), damit IP und Port
-// immer vom **rechten** Ende kommen – ein Benutzer „x from 203.0.113.7 port 1“ kann die Quell-IP nicht fälschen.
+// Security review H1: expressions anchored at start and end; the user name is greedy (`.+`) so that IP and port
+// always come from the **right** end – a user "x from 203.0.113.7 port 1" cannot forge the source IP.
 fn re_ok() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
@@ -43,13 +43,13 @@ fn re_invalid() -> &'static Regex {
     R.get_or_init(|| Regex::new(r"^Invalid user (.*) from (\S+)(?: port (\d+))?$").unwrap())
 }
 
-/// Nur echte IP-Adressen (sonst ist die Zeile kein sshd-Format, z. B. Hostname bei UseDNS)
+/// Only real IP addresses (otherwise the line is not in sshd format, e.g. a hostname with UseDNS)
 fn ip(s: &str) -> Option<String> {
     s.parse::<std::net::IpAddr>().ok().map(|a| a.to_string())
 }
 
-/// Dienstname für alle Anmeldungen aus auth.log/secure (Programmfeld und PID fälschbar, siehe `auth_log_line`).
-/// Die Zentrale zählt solche Fehlversuche nicht für automatische Sperren/Bedrohungslisten.
+/// Service name for all logins from auth.log/secure (program field and PID can be forged, see `auth_log_line`).
+/// The server does not count such failed attempts for automatic blocks/threat lists.
 pub const SERVICE_UNVERIFIED: &str = "ssh_unverified";
 
 fn skip_token(s: &str) -> Option<&str> {
@@ -58,17 +58,17 @@ fn skip_token(s: &str) -> Option<&str> {
     (end > 0).then(|| &s[end..])
 }
 
-/// Zeile aus auth.log/secure → (PID, Nachricht), nur wenn das **Programmfeld** sshd bzw. sshd-session ist:
-/// „Nov 16 10:00:00 host sshd[123]: …“ oder „2026-11-16T10:00:00.1+01:00 host sshd[123]: …“ (verankert – ein
-/// „sshd[1]:“ irgendwo in einer fremden Nachricht zählt nicht).
-/// Hinweis: In Logdateien kann `logger -t 'sshd[123]'` das Programmfeld fälschen – deshalb prüft `run` zusätzlich
-/// den Prozess (`SshdCheck`); das Journal (mit _COMM/_UID) ist die verlässliche Quelle und wird bevorzugt.
+/// Line from auth.log/secure → (PID, message), only if the **program field** is sshd or sshd-session:
+/// "Nov 16 10:00:00 host sshd[123]: …" or "2026-11-16T10:00:00.1+01:00 host sshd[123]: …" (anchored – an
+/// "sshd[1]:" somewhere in a foreign message does not count).
+/// Note: in log files `logger -t 'sshd[123]'` can forge the program field – therefore `run` additionally checks
+/// the process (`SshdCheck`); the journal (with _COMM/_UID) is the reliable source and is preferred.
 pub fn syslog_entry(line: &str) -> Option<(u32, &str)> {
     let mut rest = line;
-    // Zeitstempel: RFC 3339 (ein Feld) oder klassisch „Mon dd hh:mm:ss“ (drei Felder)
+    // timestamp: RFC 3339 (one field) or classic "Mon dd hh:mm:ss" (three fields)
     let fields = if line.starts_with(|c: char| c.is_ascii_digit()) { 1 } else { 3 };
     for _ in 0..fields + 1 {
-        rest = skip_token(rest)?; // … und der Hostname
+        rest = skip_token(rest)?; // … and the hostname
     }
     let rest = rest.trim_start_matches(' ');
     let rest = rest.strip_prefix("sshd[").or_else(|| rest.strip_prefix("sshd-session["))?;
@@ -80,29 +80,29 @@ pub fn syslog_entry(line: &str) -> Option<(u32, &str)> {
     Some((pid.parse().ok()?, &rest[close + 3..]))
 }
 
-/// wie `syslog_entry`, nur die Nachricht
+/// like `syslog_entry`, only the message
 pub fn syslog_message(line: &str) -> Option<&str> {
     syslog_entry(line).map(|(_, m)| m)
 }
 
-/// Ergebnis der Prozessprüfung für eine auth.log-Zeile
+/// Result of the process check for an auth.log line
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Origin {
-    /// PID gehört beim Lesen zu einem sshd-Programm von root, Prozess läuft als uid 0
+    /// PID belongs, at read time, to an sshd program owned by root, process runs as uid 0
     Sshd,
-    /// PID läuft nicht mehr (oder nicht prüfbar, z. B. Zombie) – Zeile zählt, aber als unbestätigt
+    /// PID no longer running (or not checkable, e.g. zombie) – line counts, but as unconfirmed
     Gone,
-    /// PID gehört einem anderen Programm/Benutzer – gefälschte Zeile (`logger -t sshd[…]`), verworfen
+    /// PID belongs to another program/user – forged line (`logger -t sshd[…]`), discarded
     Foreign,
 }
 
-/// Prüft die PID einer auth.log-Zeile über /proc (Wurzeln für Tests einstellbar).
+/// Checks the PID of an auth.log line via /proc (roots configurable for tests).
 pub struct SshdCheck {
     pub proc_root: std::path::PathBuf,
     pub fs_root: std::path::PathBuf,
 }
 
-/// erlaubte Orte der sshd-Programme (Debian/Ubuntu, RHEL/Fedora; OpenSSH ≥ 9.8 mit sshd-session)
+/// allowed locations of the sshd programs (Debian/Ubuntu, RHEL/Fedora; OpenSSH ≥ 9.8 with sshd-session)
 const SSHD_DIRS: [&str; 3] = ["/usr/sbin", "/usr/lib/openssh", "/usr/libexec/openssh"];
 
 impl Default for SshdCheck {
@@ -121,7 +121,7 @@ impl SshdCheck {
         let Ok(status) = std::fs::read_to_string(dir.join("status")) else {
             return Origin::Gone;
         };
-        // reale und effektive uid müssen 0 sein
+        // real and effective uid must be 0
         let root = status
             .lines()
             .find_map(|l| l.strip_prefix("Uid:"))
@@ -131,11 +131,11 @@ impl SshdCheck {
             return Origin::Foreign;
         }
         let Ok(exe) = std::fs::read_link(dir.join("exe")) else {
-            return Origin::Gone; // Zombie/beendet während der Prüfung
+            return Origin::Gone; // zombie/exited during the check
         };
         let exe = exe.to_string_lossy().into_owned();
         if exe.ends_with(" (deleted)") {
-            return Origin::Gone; // Programm nach Update ersetzt – nicht mehr prüfbar
+            return Origin::Gone; // program replaced after an update – no longer checkable
         }
         let p = std::path::Path::new(&exe);
         let name_ok = matches!(p.file_name().and_then(|n| n.to_str()), Some("sshd" | "sshd-session"));
@@ -143,7 +143,7 @@ impl SshdCheck {
         if !name_ok || !dir_ok {
             return Origin::Foreign;
         }
-        // Programm gehört root und ist nur für root schreibbar (sonst könnte es jeder ersetzen)
+        // program owned by root and writable only by root (otherwise anyone could replace it)
         match std::fs::symlink_metadata(self.fs_root.join(exe.trim_start_matches('/'))) {
             Ok(m) if m.file_type().is_file() && m.uid() == 0 && m.mode() & 0o022 == 0 => Origin::Sshd,
             _ => Origin::Foreign,
@@ -151,8 +151,8 @@ impl SshdCheck {
     }
 }
 
-/// Eintrag aus `journalctl -o json`: nur vom echten sshd (vom Journal gesetzte Felder _COMM und _UID, nicht fälschbar
-/// wie SYSLOG_IDENTIFIER per `logger -t sshd`)
+/// Entry from `journalctl -o json`: only from the real sshd (fields _COMM and _UID set by the journal, not forgeable
+/// like SYSLOG_IDENTIFIER via `logger -t sshd`)
 pub fn journal_message(v: &serde_json::Value) -> Option<&str> {
     let comm = v.get("_COMM").and_then(|c| c.as_str())?;
     let uid = v.get("_UID").and_then(|u| u.as_str())?;
@@ -162,7 +162,7 @@ pub fn journal_message(v: &serde_json::Value) -> Option<&str> {
     v.get("MESSAGE").and_then(|m| m.as_str())
 }
 
-/// Eine Logzeile auswerten.
+/// Evaluate a log line.
 pub fn parse_line(msg: &str) -> Option<LoginEvent> {
     let msg = msg.trim_end();
     if let Some(c) = re_ok().captures(msg) {
@@ -211,7 +211,7 @@ pub fn parse_line(msg: &str) -> Option<LoginEvent> {
     None
 }
 
-/// Fasst Fehlversuche je IP zusammen.
+/// Aggregates failed attempts per IP.
 pub struct Aggregator {
     window: Duration,
     fails: HashMap<String, (Instant, LoginEvent)>,
@@ -222,10 +222,10 @@ impl Aggregator {
         Aggregator { window, fails: HashMap::new() }
     }
 
-    /// Ereignis aufnehmen; liefert sofort zu sendende Ereignisse.
+    /// Record an event; returns events to be sent immediately.
     pub fn push(&mut self, e: LoginEvent) -> Vec<LoginEvent> {
         if e.success {
-            // vorherige Fehlversuche derselben IP zuerst melden (Kontext für „Erfolg nach Brute-Force“)
+            // report previous failed attempts of the same IP first (context for "success after brute force")
             let mut out: Vec<LoginEvent> = [e.service.as_str(), SERVICE_UNVERIFIED, "ssh"]
                 .iter()
                 .filter_map(|s| self.fails.remove(&format!("{s}|{}", e.ip)).map(|(_, f)| f))
@@ -233,18 +233,18 @@ impl Aggregator {
             out.push(e);
             return out;
         }
-        // bestätigte und unbestätigte Fehlversuche getrennt (sonst färbte ein gefälschter Eintrag echte ein und umgekehrt)
+        // confirmed and unconfirmed failed attempts separately (else a forged entry would taint real ones and vice versa)
         let key = format!("{}|{}", e.service, e.ip);
         let entry = self.fails.entry(key).or_insert_with(|| (Instant::now(), LoginEvent { count: 0, ..e.clone() }));
         entry.1.count += 1;
         entry.1.invalid_user |= e.invalid_user;
         if entry.1.user != e.user {
-            entry.1.user = "*".into(); // verschiedene Benutzernamen (typisch für Scanner)
+            entry.1.user = "*".into(); // different user names (typical for scanners)
         }
         Vec::new()
     }
 
-    /// Abgelaufene Fenster ausgeben.
+    /// Emit expired windows.
     pub fn flush(&mut self, force: bool) -> Vec<LoginEvent> {
         let w = self.window;
         let keys: Vec<String> = self.fails.iter().filter(|(_, (t, _))| force || t.elapsed() >= w).map(|(k, _)| k.clone()).collect();
@@ -252,14 +252,14 @@ impl Aggregator {
     }
 }
 
-/// auth.log-Zeile → Anmeldung, **immer** mit `service` = `SERVICE_UNVERIFIED` („ssh_unverified“), ab Agent 0.4.10:
-/// Die PID im Programmfeld ist frei wählbar – `logger -t 'sshd[<PID des sshd-Masters>]'`
-/// trifft einen dauerhaft laufenden, echten sshd. Die Prozessprüfung sortiert deshalb nur offensichtlich gefälschte
-/// Zeilen aus (PID gehört einem anderen Programm/Benutzer → verworfen), bestätigt aber nichts. Bestätigte Anmeldungen
-/// kommen nur aus dem Journal (_COMM/_UID).
+/// auth.log line → login, **always** with `service` = `SERVICE_UNVERIFIED` ("ssh_unverified"), since agent 0.4.10:
+/// The PID in the program field can be chosen freely – `logger -t 'sshd[<PID of the sshd master>]'`
+/// hits a permanently running, real sshd. The process check therefore only filters out obviously forged
+/// lines (PID belongs to another program/user → discarded), but confirms nothing. Confirmed logins
+/// come only from the journal (_COMM/_UID).
 pub fn auth_log_line(check: &SshdCheck, line: &str) -> Option<LoginEvent> {
     let (pid, msg) = syslog_entry(line)?;
-    let mut e = parse_line(msg)?; // erst parsen: /proc nur für echte Anmeldezeilen
+    let mut e = parse_line(msg)?; // parse first: /proc only for real login lines
     if check.check(pid) == Origin::Foreign {
         return None;
     }
@@ -267,17 +267,17 @@ pub fn auth_log_line(check: &SshdCheck, line: &str) -> Option<LoginEvent> {
     Some(e)
 }
 
-/// Liest Anmeldungen und ruft `emit` für jedes zu sendende Ereignis auf.
-/// Blockiert bis `stop`.
+/// Reads logins and calls `emit` for every event to be sent.
+/// Blocks until `stop`.
 pub fn run(stop: Arc<AtomicBool>, emit: impl Fn(LoginEvent) + Send + 'static) {
     let has_journal = std::path::Path::new("/run/systemd/journal").exists() && which("journalctl");
-    // Anmeldungen: aus dem Journal bestätigt (_COMM/_UID), aus auth.log immer unbestätigt (`auth_log_line`)
+    // logins: from the journal confirmed (_COMM/_UID), from auth.log always unconfirmed (`auth_log_line`)
     let (tx, rx) = std::sync::mpsc::channel::<LoginEvent>();
     if has_journal {
         let tx = tx.clone();
         std::thread::spawn(move || {
             let child = Command::new("journalctl")
-                // Feldfilter auf vom Journal selbst gesetzte Felder: gleiche Felder = ODER, verschiedene = UND
+                // field filter on fields set by the journal itself: same fields = OR, different = AND
                 .args(["-f", "-n", "0", "-o", "json", "_COMM=sshd", "_COMM=sshd-session", "_UID=0"])
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -306,7 +306,7 @@ pub fn run(stop: Arc<AtomicBool>, emit: impl Fn(LoginEvent) + Send + 'static) {
             None => true,
         }));
     }
-    // Datenbanken (Köder-Benutzer, Plan Köder Phase 2): Journal der DB-Units und übliche Protokolldateien
+    // databases (decoy users, plan decoys phase 2): journal of the DB units and usual log files
     if has_journal {
         let tx = tx.clone();
         std::thread::spawn(move || {
@@ -339,7 +339,7 @@ pub fn run(stop: Arc<AtomicBool>, emit: impl Fn(LoginEvent) + Send + 'static) {
     }
     drop(tx);
     let mut agg = Aggregator::new(Duration::from_secs(300));
-    // Datenbank-Fehlanmeldungen einzeln (Benutzername zählt), je Dienst und Benutzer höchstens einmal je Minute
+    // database failed logins individually (user name matters), at most once per minute per service and user
     let mut db_seen: HashMap<String, Instant> = HashMap::new();
     loop {
         match rx.recv_timeout(Duration::from_secs(1)) {
@@ -360,7 +360,7 @@ pub fn run(stop: Arc<AtomicBool>, emit: impl Fn(LoginEvent) + Send + 'static) {
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             Err(_) => {
-                // keine Quelle: nur warten
+                // no source: just wait
                 std::thread::sleep(Duration::from_secs(1));
             }
         }
@@ -381,7 +381,7 @@ fn which(bin: &str) -> bool {
         .any(|d| std::path::Path::new(d).join(bin).is_file())
 }
 
-/// `tail -F`: folgt der Datei auch über Logrotation (Inode-Wechsel).
+/// `tail -F`: follows the file across log rotation as well (inode change).
 fn tail(path: &str, stop: &AtomicBool, mut f: impl FnMut(String) -> bool) {
     use std::os::unix::fs::MetadataExt;
     let mut file = match std::fs::File::open(path) {
@@ -438,7 +438,7 @@ mod tests {
 
     #[test]
     fn username_cannot_spoof_ip() {
-        // Angreifer wählt den Benutzernamen „x from 203.0.113.7 port 1“ – maßgeblich ist die IP am Zeilenende
+        // attacker chooses the user name "x from 203.0.113.7 port 1" – the IP at the end of the line is what counts
         let e = parse_line("Invalid user x from 203.0.113.7 port 1 from 198.51.100.9 port 40000").unwrap();
         assert_eq!(e.ip, "198.51.100.9");
         assert_eq!(e.user, "x from 203.0.113.7 port 1");
@@ -446,7 +446,7 @@ mod tests {
         assert_eq!((e.ip.as_str(), e.port), ("198.51.100.9", 40001));
         let e = parse_line("Failed publickey for root from 198.51.100.9 port 40002 ssh2: RSA SHA256:abc").unwrap();
         assert_eq!(e.ip, "198.51.100.9");
-        // Text nach dem sshd-Format (z. B. angehängt) oder davor → keine Anmeldung
+        // text after the sshd format (e.g. appended) or before it → no login
         assert!(parse_line("Accepted password for root from 203.0.113.7 port 22 ssh2 trailing junk here").is_none());
         assert!(parse_line("evil: Accepted password for root from 203.0.113.7 port 22 ssh2").is_none());
         assert!(parse_line("Failed password for root from not-an-ip port 22 ssh2").is_none());
@@ -459,10 +459,10 @@ mod tests {
         assert!(journal_message(&j("sshd-session", "0")).is_some());
         // logger -t sshd: _COMM=logger
         assert!(journal_message(&j("logger", "0")).is_none());
-        // Programm namens „sshd“ eines normalen Benutzers
+        // program named "sshd" of a normal user
         assert!(journal_message(&j("sshd", "33")).is_none());
         assert!(journal_message(&serde_json::json!({"MESSAGE": "Accepted password for root from 1.2.3.4 port 1 ssh2"})).is_none());
-        // Logdatei
+        // log file
         assert_eq!(
             syslog_message("Nov 16 10:00:00 web1 sshd[1234]: Accepted publickey for root from 203.0.113.5 port 51234 ssh2"),
             Some("Accepted publickey for root from 203.0.113.5 port 51234 ssh2")
@@ -478,14 +478,14 @@ mod tests {
             syslog_entry("2026-11-16T10:00:00.123456+01:00 web1 sshd-session[1234]: Accepted publickey for root from 203.0.113.5 port 5 ssh2"),
             Some((1234, "Accepted publickey for root from 203.0.113.5 port 5 ssh2"))
         );
-        // „sshd[…]:“ nur als Teil einer fremden Nachricht
+        // "sshd[…]:" only as part of a foreign message
         assert!(syslog_entry("Nov 16 10:00:00 web1 cron[1]: x sshd[1]: Accepted password for root from 1.2.3.4 port 1 ssh2").is_none());
         assert!(syslog_entry("Nov 16 10:00:00 web1 evilsshd[1]: Accepted password for root from 1.2.3.4 port 1 ssh2").is_none());
         assert!(syslog_entry("Nov 16 10:00:00 web1 sshd[]: Accepted password for root from 1.2.3.4 port 1 ssh2").is_none());
         assert!(syslog_entry("sshd[1]: Accepted password for root from 1.2.3.4 port 1 ssh2").is_none());
     }
 
-    /// Falsches /proc (pid, Uid-Werte, Ziel von exe) und Dateisystem (Programm, Rechte)
+    /// Fake /proc (pid, Uid values, target of exe) and file system (program, permissions)
     fn fake_root(name: &str, procs: &[(u32, &str, &str)], bins: &[(&str, u32)]) -> (SshdCheck, std::path::PathBuf) {
         use std::os::unix::fs::PermissionsExt;
         let base = std::env::temp_dir().join(format!("auth-{name}-{}", std::process::id()));
@@ -513,11 +513,11 @@ mod tests {
             &[
                 (100, "0\t0\t0\t0", "/usr/sbin/sshd"),
                 (101, "0\t0\t0\t0", "/usr/lib/openssh/sshd-session"),
-                (200, "1000\t1000\t1000\t1000", "/usr/sbin/sshd"), // Prozess eines Benutzers
-                (201, "1000\t0\t0\t0", "/usr/sbin/sshd"),           // nur effektiv root
+                (200, "1000\t1000\t1000\t1000", "/usr/sbin/sshd"), // a user's process
+                (201, "1000\t0\t0\t0", "/usr/sbin/sshd"),           // only effectively root
                 (300, "0\t0\t0\t0", "/usr/bin/logger"),
                 (301, "0\t0\t0\t0", "/tmp/sshd"),
-                (302, "0\t0\t0\t0", "/usr/sbin/sshd-session"), // Programm für alle schreibbar
+                (302, "0\t0\t0\t0", "/usr/sbin/sshd-session"), // program writable by everyone
                 (303, "0\t0\t0\t0", "/usr/sbin/sshd (deleted)"),
             ],
             &[("/usr/sbin/sshd", 0o755), ("/usr/lib/openssh/sshd-session", 0o755), ("/usr/sbin/sshd-session", 0o777), ("/tmp/sshd", 0o755), ("/usr/bin/logger", 0o755)],
@@ -538,18 +538,18 @@ mod tests {
 
         let line = |pid: u32| format!("Nov 16 10:00:00 web1 sshd[{pid}]: Failed password for root from 198.51.100.7 port 4000 ssh2");
         if root_owned {
-            // auch die PID eines echten, laufenden sshd bestätigt nichts (logger -t 'sshd[<Master-PID>]')
+            // even the PID of a real, running sshd confirms nothing (logger -t 'sshd[<master PID>]')
             for pid in [100, 101] {
                 assert_eq!(auth_log_line(&c, &line(pid)).unwrap().service, SERVICE_UNVERIFIED);
             }
         }
-        // logger -t 'sshd[300]' eines Benutzers bzw. fremdes Programm → verworfen
+        // a user's logger -t 'sshd[300]' or a foreign program → discarded
         assert!(auth_log_line(&c, &line(200)).is_none());
         assert!(auth_log_line(&c, &line(300)).is_none());
-        // PID schon weg → angenommen, aber unbestätigt
+        // PID already gone → accepted, but unconfirmed
         let e = auth_log_line(&c, &line(999)).unwrap();
         assert_eq!((e.service.as_str(), e.ip.as_str()), (SERVICE_UNVERIFIED, "198.51.100.7"));
-        // keine Anmeldezeile → gar nicht erst geprüft
+        // not a login line → not checked at all
         assert!(auth_log_line(&c, "Nov 16 10:00:00 web1 sshd[999]: Connection closed by 1.2.3.4 port 22").is_none());
         std::fs::remove_dir_all(&base).ok();
     }
@@ -567,7 +567,7 @@ mod tests {
         assert_eq!(out.len(), 2);
         assert_eq!((out[0].service.as_str(), out[0].count), ("ssh", 1));
         assert_eq!((out[1].service.as_str(), out[1].count), (SERVICE_UNVERIFIED, 50));
-        // Erfolg meldet beide vorher
+        // success reports both before it
         a.push(fail("ssh"));
         a.push(fail(SERVICE_UNVERIFIED));
         assert_eq!(a.push(parse_line("Accepted password for root from 198.51.100.7 port 2 ssh2").unwrap()).len(), 3);
@@ -580,7 +580,7 @@ mod tests {
         for u in ["admin", "root", "test"] {
             assert!(a.push(parse_line(&format!("Failed password for {u} from 198.51.100.7 port 1 ssh2")).unwrap()).is_empty());
         }
-        // Erfolg derselben IP: erst die Fehlversuche (3, Benutzer *), dann der Erfolg
+        // success of the same IP: first the failed attempts (3, user *), then the success
         let out = a.push(parse_line("Accepted password for root from 198.51.100.7 port 2 ssh2").unwrap());
         assert_eq!(out.len(), 2);
         assert_eq!((out[0].count, out[0].user.as_str(), out[0].success), (3, "*", false));

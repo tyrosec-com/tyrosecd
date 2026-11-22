@@ -1,6 +1,6 @@
-//! Kompromittierungs-Check (Hauptplan 21.2, Prototyp nach 27.5).
-//! Läuft ohne Zentrale; Abgleich gegen externe Referenzen (WordPress.org)
-//! plus lokale Inventur. Ergebnis: Funde mit Schwere + Liste „bitte bestätigen“.
+//! Compromise check (main plan 21.2, prototype per 27.5).
+//! Runs without the central server; compares against external references (WordPress.org)
+//! plus a local inventory. Result: findings with severity + a "please confirm" list.
 
 pub mod gitindex;
 pub mod pkg;
@@ -9,7 +9,7 @@ pub mod system;
 pub mod timeline;
 pub mod web;
 pub mod wordpress;
-/// Sicheres Lesen unter fremden Wurzeln (Container) – für Crates ohne direkte Abhängigkeit von tyrosd-core
+/// Safe reading under foreign roots (containers) – for crates without a direct dependency on tyrosd-core
 pub use tyrosd_core::rootfs;
 
 use serde::Serialize;
@@ -38,12 +38,12 @@ pub enum Category {
 impl Category {
     pub fn label(&self) -> &'static str {
         match self {
-            Category::Web => "Web-Code",
-            Category::Persistence => "Persistenz",
-            Category::Binaries => "Programme",
-            Category::Runtime => "Laufender Zustand",
-            Category::Network => "Netzwerk",
-            Category::History => "Vorgeschichte",
+            Category::Web => "Web code",
+            Category::Persistence => "Persistence",
+            Category::Binaries => "Programs",
+            Category::Runtime => "Running state",
+            Category::Network => "Network",
+            Category::History => "History",
         }
     }
     pub fn all() -> [Category; 6] {
@@ -55,14 +55,14 @@ impl Category {
 pub struct Finding {
     pub severity: Severity,
     pub category: Category,
-    /// Stabiler Kurzname der Prüfung, z. B. `wp_core_modified`
+    /// Stable short name of the check, e.g. `wp_core_modified`
     pub check: &'static str,
     pub title: String,
     pub path: Option<String>,
     pub detail: Option<String>,
 }
 
-/// Eintrag, den der Nutzer einmal bestätigen muss (SSH-Key, Cronjob …).
+/// Entry the user has to confirm once (SSH key, cron job …).
 #[derive(Serialize, Clone, Debug)]
 pub struct ConfirmItem {
     pub kind: &'static str,
@@ -82,7 +82,7 @@ pub struct Report {
     pub stats: serde_json::Map<String, serde_json::Value>,
     pub timeline: Option<timeline::Timeline>,
     pub notes: Vec<String>,
-    /// Programme/Bibliotheken mit Paket, Version und md5 – Abgleich gegen offizielle Pakete in der Zentrale
+    /// Programs/libraries with package, version and md5 – compared against official packages on the central server
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub binaries: Vec<BinaryRef>,
 }
@@ -92,10 +92,10 @@ pub struct BinaryRef {
     pub path: String,
     pub package: String,
     pub version: String,
-    /// dpkg-Systeme: md5 der Datei
+    /// dpkg systems: md5 of the file
     #[serde(skip_serializing_if = "String::is_empty")]
     pub md5: String,
-    /// RPM-Systeme: SHA-256 der Datei (selbst berechnet) und Paket-Architektur
+    /// RPM systems: SHA-256 of the file (computed locally) and package architecture
     #[serde(skip_serializing_if = "String::is_empty")]
     pub sha256: String,
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -114,14 +114,14 @@ pub struct HostInfo {
 pub struct CategorySummary {
     pub category: Category,
     pub label: &'static str,
-    /// rot / gelb / grün
+    /// red / yellow / green
     pub light: &'static str,
     pub counts: [usize; 5],
 }
 
 #[derive(Clone, Debug)]
 pub struct CheckConfig {
-    /// Wurzel des zu prüfenden Systems (für Tests/Offline-Scan: gemountetes Image)
+    /// Root of the system to check (for tests/offline scan: mounted image)
     pub sysroot: String,
     pub webroots: Vec<String>,
     pub offline: bool,
@@ -143,12 +143,12 @@ impl Default for CheckConfig {
     }
 }
 
-/// Sammelt Funde und Statistik.
+/// Collects findings and statistics.
 pub struct Ctx {
     pub cfg: CheckConfig,
     pub report: Report,
     pub pkgs: pkg::PackageDb,
-    /// Dateien, die gegen eine Referenz geprüft und unverändert sind
+    /// Files that were checked against a reference and are unchanged
     pub verified: std::collections::HashSet<String>,
 }
 
@@ -162,7 +162,7 @@ impl Ctx {
     pub fn stat(&mut self, k: &str, v: impl Into<serde_json::Value>) {
         self.report.stats.insert(k.to_string(), v.into());
     }
-    /// Pfad innerhalb des geprüften Systems
+    /// Path within the checked system
     pub fn p(&self, abs: &str) -> String {
         if self.cfg.sysroot == "/" {
             abs.to_string()
@@ -184,13 +184,13 @@ fn os_pretty(sysroot_p: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Standard-Webroots, falls keine angegeben.
+/// Default webroots if none are given.
 pub fn default_webroots(sysroot: &str) -> Vec<String> {
     let pre = sysroot.trim_end_matches('/');
     default_webroots_in(&tyrosd_core::rootfs::FsRoot::host(sysroot)).into_iter().map(|r| format!("{pre}{r}")).collect()
 }
 
-/// Standard-Webroots unter einer Wurzel, als Pfade **relativ** zu ihr (Container: `FsRoot::Contained`)
+/// Default webroots under a root, as paths **relative** to it (containers: `FsRoot::Contained`)
 pub fn default_webroots_in(fs: &tyrosd_core::rootfs::FsRoot) -> Vec<String> {
     let mut v = Vec::new();
     for p in ["/var/www", "/srv/www", "/srv/http", "/usr/share/nginx/html"] {
@@ -210,7 +210,7 @@ pub fn default_webroots_in(fs: &tyrosd_core::rootfs::FsRoot) -> Vec<String> {
     }
     v.sort();
     v.dedup();
-    // verschachtelte Wurzeln entfernen (/var/www enthält /var/www/vhosts/...)
+    // remove nested roots (/var/www contains /var/www/vhosts/...)
     let copy = v.clone();
     v.retain(|a| !copy.iter().any(|b| b != a && a.starts_with(&format!("{b}/"))));
     v
@@ -240,7 +240,7 @@ pub fn run(mut cfg: CheckConfig) -> Report {
     system::check(&mut ctx);
     timeline::check(&mut ctx);
 
-    // Sortieren: schwerste zuerst
+    // sort: most severe first
     ctx.report.findings.sort_by(|a, b| b.severity.cmp(&a.severity).then(a.category.cmp(&b.category)));
     ctx.report.summary = Category::all()
         .iter()
@@ -249,12 +249,13 @@ pub fn run(mut cfg: CheckConfig) -> Report {
             for f in ctx.report.findings.iter().filter(|f| f.category == *c) {
                 counts[f.severity as usize] += 1;
             }
+            // traffic light; the central stores it as before (it maps red/yellow/green)
             let light = if counts[4] + counts[3] > 0 {
-                "rot"
+                "red"
             } else if counts[2] > 0 {
-                "gelb"
+                "yellow"
             } else {
-                "grün"
+                "green"
             };
             CategorySummary { category: *c, label: c.label(), light, counts }
         })
@@ -263,32 +264,32 @@ pub fn run(mut cfg: CheckConfig) -> Report {
     ctx.report
 }
 
-/// Lesbarer Kurzbericht.
+/// Readable short report.
 pub fn render_text(r: &Report, max_findings: usize) -> String {
     use std::fmt::Write;
     let mut s = String::new();
-    let _ = writeln!(s, "Kompromittierungs-Check · {} · {} · Kernel {}", r.host.hostname, r.host.os, r.host.kernel);
-    let _ = writeln!(s, "Dauer: {:.1} s · Paket-DB: {}\n", r.duration_ms as f64 / 1000.0, r.host.package_manager);
+    let _ = writeln!(s, "Compromise check · {} · {} · kernel {}", r.host.hostname, r.host.os, r.host.kernel);
+    let _ = writeln!(s, "Duration: {:.1} s · package DB: {}\n", r.duration_ms as f64 / 1000.0, r.host.package_manager);
     for c in &r.summary {
         let icon = match c.light {
-            "rot" => "[ROT ]",
-            "gelb" => "[GELB]",
-            _ => "[GRÜN]",
+            "red" => "[RED ]",
+            "yellow" => "[YLW ]",
+            _ => "[GRN ]",
         };
         let _ = writeln!(
             s,
-            "{icon} {:<18} kritisch {} · hoch {} · mittel {} · niedrig {}",
+            "{icon} {:<18} critical {} · high {} · medium {} · low {}",
             c.label, c.counts[4], c.counts[3], c.counts[2], c.counts[1]
         );
     }
     let relevant: Vec<&Finding> = r.findings.iter().filter(|f| f.severity >= Severity::Medium).collect();
-    let _ = writeln!(s, "\nFunde (mittel und höher): {}", relevant.len());
+    let _ = writeln!(s, "\nFindings (medium and above): {}", relevant.len());
     for f in relevant.iter().take(max_findings) {
         let sev = match f.severity {
-            Severity::Critical => "KRITISCH",
-            Severity::High => "HOCH",
-            Severity::Medium => "MITTEL",
-            Severity::Low => "niedrig",
+            Severity::Critical => "CRITICAL",
+            Severity::High => "HIGH",
+            Severity::Medium => "MEDIUM",
+            Severity::Low => "low",
             Severity::Info => "info",
         };
         let _ = writeln!(s, "  {sev:<8} {}{}", f.title, f.path.as_ref().map(|p| format!(" — {p}")).unwrap_or_default());
@@ -297,9 +298,9 @@ pub fn render_text(r: &Report, max_findings: usize) -> String {
         }
     }
     if relevant.len() > max_findings {
-        let _ = writeln!(s, "  … {} weitere (siehe JSON)", relevant.len() - max_findings);
+        let _ = writeln!(s, "  … {} more (see JSON)", relevant.len() - max_findings);
     }
-    let _ = writeln!(s, "\nBitte bestätigen: {} Einträge (SSH-Keys, Cronjobs, Dienste, offene Ports …)", r.confirm.len());
+    let _ = writeln!(s, "\nPlease confirm: {} entries (SSH keys, cron jobs, services, open ports …)", r.confirm.len());
     let mut kinds: std::collections::BTreeMap<&str, usize> = Default::default();
     for c in &r.confirm {
         *kinds.entry(c.kind).or_default() += 1;
@@ -308,7 +309,7 @@ pub fn render_text(r: &Report, max_findings: usize) -> String {
         let _ = writeln!(s, "  {k}: {n}");
     }
     for n in &r.notes {
-        let _ = writeln!(s, "Hinweis: {n}");
+        let _ = writeln!(s, "Note: {n}");
     }
     s
 }

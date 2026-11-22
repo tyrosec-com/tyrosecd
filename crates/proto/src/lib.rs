@@ -1,18 +1,18 @@
-//! Protokoll Agent ↔ Zentrale (Protobuf über HTTPS, mTLS).
+//! Protocol agent ↔ central server (Protobuf over HTTPS, mTLS).
 //!
-//! Nachrichten sind hier direkt als `prost`-Strukturen definiert (kein protoc
-//! nötig). Die Datei `proto/tyrosd.proto` in diesem Repository beschreibt dasselbe
-//! Schema für andere Sprachen und muss synchron gehalten werden.
+//! Messages are defined here directly as `prost` structs (no protoc
+//! required). The file `proto/tyrosd.proto` in this repository describes the same
+//! schema for other languages and must be kept in sync.
 //!
 //! Transport:
-//! - `POST /v1/enroll`     EnrollRequest  → EnrollResponse (ohne Client-Zertifikat, mit Einmal-Token)
+//! - `POST /v1/enroll`     EnrollRequest  → EnrollResponse (without client certificate, with one-time token)
 //! - `POST /v1/batch`      Batch (zstd)   → BatchAck       (mTLS)
 //! - `POST /v1/heartbeat`  Heartbeat      → HeartbeatAck   (mTLS)
 //!
-//! Manipulationsnachweis: Jede `Envelope` trägt `seq` (lückenlos steigend) und
-//! `prev_hash` = SHA-256 der kodierten Vorgänger-Envelope.
+//! Tamper evidence: every `Envelope` carries `seq` (gapless, increasing) and
+//! `prev_hash` = SHA-256 of the encoded preceding envelope.
 
-/// Protokollversion (Hauptplan 27.2 B5). Zentrale akzeptiert mindestens N-1.
+/// Protocol version (master plan 27.2 B5). The central server accepts at least N-1.
 pub const PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Clone, PartialEq, prost::Message)]
@@ -31,10 +31,10 @@ pub struct EnrollRequest {
 pub struct EnrollResponse {
     #[prost(string, tag = "1")]
     pub host_id: String,
-    /// Client-Zertifikat (signiert von der Agent-CA der Zentrale)
+    /// Client certificate (signed by the central server's agent CA)
     #[prost(string, tag = "2")]
     pub cert_pem: String,
-    /// CA, mit der der Agent das Server-Zertifikat prüft (nur Self-hosted/Test; sonst leer = Web-PKI)
+    /// CA the agent uses to verify the server certificate (self-hosted/test only; otherwise empty = Web PKI)
     #[prost(string, tag = "3")]
     pub server_ca_pem: String,
     #[prost(string, tag = "4")]
@@ -61,20 +61,20 @@ pub struct HostInfo {
 pub struct Batch {
     #[prost(uint32, tag = "1")]
     pub protocol: u32,
-    /// kodierte `Envelope`s, exakt wie im Spool (Hash-Kette läuft über diese Bytes)
+    /// encoded `Envelope`s, exactly as in the spool (the hash chain runs over these bytes)
     #[prost(bytes = "vec", repeated, tag = "2")]
     pub envelopes: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct BatchAck {
-    /// höchste dauerhaft gespeicherte seq (Agent darf alles ≤ löschen)
+    /// highest durably stored seq (the agent may delete everything ≤ this)
     #[prost(uint64, tag = "1")]
     pub acked_seq: u64,
-    /// Pfade, für die der Zentrale die Basis fehlt → vollen Inhalt senden
+    /// paths for which the central server lacks the base → send full content
     #[prost(string, repeated, tag = "2")]
     pub resync_paths: Vec<String>,
-    /// Kette gebrochen erkannt (nur Info; Zentrale alarmiert selbst)
+    /// broken chain detected (info only; the central server raises the alert itself)
     #[prost(bool, tag = "3")]
     pub chain_gap: bool,
 }
@@ -108,17 +108,17 @@ pub mod envelope {
         Login(super::LoginEvent),
         #[prost(message, tag = "16")]
         Inventory(super::InventoryReport),
-        /// Erkennung im Agent (Reverse Shell, Shell aus dem Webserver, Mining/Spam-Verbindung …)
+        /// Detection in the agent (reverse shell, shell from the web server, mining/spam connection …)
         #[prost(message, tag = "17")]
         Detection(super::Detection),
-        /// Ergebnis einer Aktion aus der Zentrale (Wiederherstellen, Quarantäne, IP sperren)
+        /// Result of an action from the central server (restore, quarantine, block IP)
         #[prost(message, tag = "18")]
         ActionResult(super::ActionResult),
     }
 }
 
-/// Auftrag der Zentrale (über die Heartbeat-Antwort). Nur feste Arten; der Agent führt sie nur aus,
-/// wenn sie auf dem Server lokal freigeschaltet sind (`tyrosecd actions enable`).
+/// Job from the central server (via the heartbeat response). Fixed kinds only; the agent executes them only
+/// if they are enabled locally on the server (`tyrosecd actions enable`).
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Action {
     #[prost(uint64, tag = "1")]
@@ -130,19 +130,19 @@ pub struct Action {
     pub path: String,
     #[prost(string, tag = "4")]
     pub ip: String,
-    /// Sperrdauer in Sekunden (0 = dauerhaft)
+    /// Block duration in seconds (0 = permanent)
     #[prost(uint32, tag = "5")]
     pub duration_s: u32,
-    /// Inhalt für restore (zstd)
+    /// Content for restore (zstd)
     #[prost(bytes = "vec", tag = "6")]
     pub content_zstd: Vec<u8>,
-    /// SHA-256 des Inhalts (Prüfung nach dem Entpacken)
+    /// SHA-256 of the content (checked after decompression)
     #[prost(bytes = "vec", tag = "7")]
     pub content_hash: Vec<u8>,
-    /// Dateirechte für eine wiederhergestellte, nicht mehr vorhandene Datei
+    /// File mode for a restored file that no longer exists
     #[prost(uint32, tag = "8")]
     pub mode: u32,
-    /// Parameter als JSON (Köder: Werte wie Benutzer/Passwort/geheime Adresse – nie ein Datei-Inhalt)
+    /// Parameters as JSON (decoy: values such as user/password/secret address – never file content)
     #[prost(string, tag = "9")]
     pub params: String,
 }
@@ -157,12 +157,12 @@ pub struct ActionResult {
     pub message: String,
 }
 
-/// Verkehr je Port in der letzten Minute (Schätzung aus TCP-Verbindungen)
+/// Traffic per port in the last minute (estimated from TCP connections)
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct PortTraffic {
     #[prost(uint32, tag = "1")]
     pub port: u32,
-    /// in = Dienst auf diesem Server, out = Ziel-Port einer ausgehenden Verbindung
+    /// in = service on this server, out = destination port of an outgoing connection
     #[prost(string, tag = "2")]
     pub dir: String,
     #[prost(uint64, tag = "3")]
@@ -217,19 +217,19 @@ pub struct FileEvent {
     /// full, redacted, hash, meta
     #[prost(string, tag = "10")]
     pub mode: String,
-    /// Hash der Basis (gespeicherte Fassung), gegen die `patch` erzeugt wurde
+    /// Hash of the base (stored version) against which `patch` was created
     #[prost(bytes = "vec", tag = "11")]
     pub base_hash: Vec<u8>,
-    /// Hash des Rohinhalts
+    /// Hash of the raw content
     #[prost(bytes = "vec", tag = "12")]
     pub raw_hash: Vec<u8>,
-    /// Hash der gespeicherten (ggf. maskierten) Fassung nach der Änderung
+    /// Hash of the stored (possibly masked) version after the change
     #[prost(bytes = "vec", tag = "13")]
     pub stored_hash: Vec<u8>,
-    /// unified diff (zstd), nur bei vorhandener Basis
+    /// unified diff (zstd), only if a base exists
     #[prost(bytes = "vec", tag = "14")]
     pub patch_zstd: Vec<u8>,
-    /// voller (ggf. maskierter) Inhalt (zstd), wenn keine Basis existiert
+    /// full (possibly masked) content (zstd) if no base exists
     #[prost(bytes = "vec", tag = "15")]
     pub content_zstd: Vec<u8>,
     #[prost(message, optional, tag = "16")]
@@ -240,7 +240,7 @@ pub struct FileEvent {
     pub diff_lines: u32,
 }
 
-/// Voller Inhalt auf Anforderung der Zentrale (resync).
+/// Full content on request of the central server (resync).
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct FileContent {
     #[prost(string, tag = "1")]
@@ -249,7 +249,7 @@ pub struct FileContent {
     pub stored_hash: Vec<u8>,
     #[prost(bytes = "vec", tag = "3")]
     pub content_zstd: Vec<u8>,
-    /// Inhalt war nicht (mehr) vorhanden
+    /// Content was not (or no longer) present
     #[prost(bool, tag = "4")]
     pub missing: bool,
 }
@@ -260,7 +260,7 @@ pub struct MetricBatch {
     pub points: Vec<MetricPoint>,
 }
 
-/// 1-Minuten-Aggregat (Hauptplan 23.3)
+/// 1-minute aggregate (master plan 23.3)
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct MetricPoint {
     #[prost(int64, tag = "1")]
@@ -289,17 +289,17 @@ pub struct MetricPoint {
     pub steal_pct: f32,
     #[prost(uint32, tag = "13")]
     pub procs: u32,
-    /// Druck (PSI, „some“ avg60 in %): Wartezeit auf CPU, Speicher, IO; -1 = nicht verfügbar
+    /// Pressure (PSI, "some" avg60 in %): wait time for CPU, memory, IO; -1 = not available
     #[prost(float, tag = "14")]
     pub psi_cpu: f32,
     #[prost(float, tag = "15")]
     pub psi_mem: f32,
     #[prost(float, tag = "16")]
     pub psi_io: f32,
-    /// Prozesse mit der meisten CPU-Zeit in dieser Minute
+    /// Processes with the most CPU time in this minute
     #[prost(message, repeated, tag = "17")]
     pub top: Vec<TopProc>,
-    /// Verkehr je Port (ab Agent 0.3.0)
+    /// Traffic per port (since agent 0.3.0)
     #[prost(message, repeated, tag = "18")]
     pub ports: Vec<PortTraffic>,
 }
@@ -316,7 +316,7 @@ pub struct TopProc {
     pub pid: u32,
 }
 
-/// Erkennung im Agent; die Zentrale macht daraus einen Alarm (dedupliziert)
+/// Detection in the agent; the central server turns it into an alert (deduplicated)
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct Detection {
     #[prost(string, tag = "1")]
@@ -334,7 +334,7 @@ pub struct Detection {
     pub exe: String,
     #[prost(string, repeated, tag = "7")]
     pub proc_chain: Vec<String>,
-    /// Schlüssel für die Entdopplung in der Zentrale (z. B. Ziel-IP:Port + Programm)
+    /// Key for deduplication in the central server (e.g. destination IP:port + program)
     #[prost(string, tag = "8")]
     pub key: String,
 }
@@ -364,7 +364,7 @@ pub struct Lifecycle {
     pub detail: String,
 }
 
-/// Bericht des Kompromittierungs-Checks (JSON, siehe tyrosd-check::Report)
+/// Report of the compromise check (JSON, see tyrosd-check::Report)
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct CheckReport {
     #[prost(bytes = "vec", tag = "1")]
@@ -387,10 +387,10 @@ pub struct Heartbeat {
     pub uptime_s: u64,
     #[prost(uint64, tag = "7")]
     pub rss_kb: u64,
-    /// lokal freigeschaltete Aktionen (agent.toml `actions`), damit die Oberfläche sie anbieten kann
+    /// locally enabled actions (agent.toml `actions`), so the web interface can offer them
     #[prost(string, repeated, tag = "8")]
     pub actions: Vec<String>,
-    /// geladenes YARA-Regelpaket („r1“, leer = keins), Regeln, Speicher nach dem Laden, letzter Fehler (ab 0.5.0)
+    /// loaded YARA rule pack ("r1", empty = none), rules, memory after loading, last error (since 0.5.0)
     #[prost(string, tag = "9")]
     pub rules_version: String,
     #[prost(uint32, tag = "10")]
@@ -405,35 +405,35 @@ pub struct Heartbeat {
 pub struct HeartbeatAck {
     #[prost(uint32, tag = "1")]
     pub interval_s: u32,
-    /// verfügbare Agent-Version (leer = kein Update). Der Agent installiert nur
-    /// signierte, höhere Versionen – die Zentrale kann nichts erzwingen.
+    /// available agent version (empty = no update). The agent only installs
+    /// signed, higher versions – the central server cannot force anything.
     #[prost(string, tag = "2")]
     pub update_version: String,
-    /// Download-Basis des Releases (manifest.json, manifest.json.sig, Binaries)
+    /// Download base of the release (manifest.json, manifest.json.sig, binaries)
     #[prost(string, tag = "3")]
     pub update_base: String,
-    /// Zentrale bittet um einen Kompromittierungs-Check (Knopf in der Web-Oberfläche)
+    /// The central server requests a compromise check (button in the web interface)
     #[prost(bool, tag = "4")]
     pub run_check: bool,
-    /// ausstehende Aktionen (höchstens wenige je Heartbeat)
+    /// pending actions (at most a few per heartbeat)
     #[prost(message, repeated, tag = "5")]
     pub actions: Vec<Action>,
-    /// aktuelles YARA-Regelpaket („r1“) und seine Basis-URL (…/rules/r1) – der Agent lädt nur signierte, höhere Pakete
-    /// von einer erlaubten Quelle (update_sources)
+    /// current YARA rule pack ("r1") and its base URL (…/rules/r1) – the agent only loads signed, higher packs
+    /// from an allowed source (update_sources)
     #[prost(string, tag = "6")]
     pub rules_version: String,
     #[prost(string, tag = "7")]
     pub rules_base: String,
 }
 
-/// Hash-Kette: SHA-256 über die kodierte Envelope (wird vom Aufrufer berechnet,
-/// damit dieses Crate ohne Krypto-Abhängigkeit bleibt).
+/// Hash chain: SHA-256 over the encoded envelope (computed by the caller,
+/// so that this crate stays free of crypto dependencies).
 pub fn encode_envelope(e: &Envelope) -> Vec<u8> {
     use prost::Message;
     e.encode_to_vec()
 }
 
-/// Anmeldung (SSH). Erfolge einzeln, Fehlversuche je Quelle aggregiert.
+/// Login (SSH). Successes individually, failed attempts aggregated per source.
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct LoginEvent {
     /// ssh
@@ -452,21 +452,21 @@ pub struct LoginEvent {
     pub method: String,
     #[prost(string, tag = "7")]
     pub key_type: String,
-    /// z. B. SHA256:…
+    /// e.g. SHA256:…
     #[prost(string, tag = "8")]
     pub key_fp: String,
-    /// Anzahl (bei aggregierten Fehlversuchen)
+    /// Count (for aggregated failed attempts)
     #[prost(uint32, tag = "9")]
     pub count: u32,
-    /// Benutzer existiert nicht
+    /// User does not exist
     #[prost(bool, tag = "10")]
     pub invalid_user: bool,
-    /// Beginn des Aggregationsfensters
+    /// Start of the aggregation window
     #[prost(int64, tag = "11")]
     pub first_ts_ns: i64,
 }
 
-/// Server-Inventar (Dienste, Prozesse, Ports, Firewall) als JSON (siehe tyrosd-inventory)
+/// Server inventory (services, processes, ports, firewall) as JSON (see tyrosd-inventory)
 #[derive(Clone, PartialEq, prost::Message)]
 pub struct InventoryReport {
     #[prost(bytes = "vec", tag = "1")]

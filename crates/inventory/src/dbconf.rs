@@ -1,12 +1,12 @@
-//! MySQL/MariaDB: protokolliert der Server Fehlanmeldungen? (Plan „Köder-Zugangsdaten“, Phase 2)
+//! MySQL/MariaDB: does the server log failed logins? (plan "decoy credentials", phase 2)
 //!
-//! Nur die Werte aus der Konfiguration – ob MySQL oder MariaDB, entscheidet die Zentrale anhand der Pakete:
-//! MySQL 8 schreibt „Access denied“ nur mit `log_error_verbosity = 3`, MariaDB mit `log_warnings ≥ 2` (Standard).
+//! Only the values from the configuration – whether MySQL or MariaDB is decided by the server based on the packages:
+//! MySQL 8 writes "Access denied" only with `log_error_verbosity = 3`, MariaDB with `log_warnings ≥ 2` (default).
 use serde::Serialize;
 
 #[derive(Serialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct MysqlConf {
-    /// Konfiguration gefunden (/etc/mysql, /etc/my.cnf …)
+    /// Configuration found (/etc/mysql, /etc/my.cnf …)
     pub present: bool,
     pub log_error_verbosity: Option<u8>,
     pub log_warnings: Option<u8>,
@@ -26,7 +26,7 @@ fn files() -> Vec<std::path::PathBuf> {
     v
 }
 
-/// Werte aus Konfigurationstext (spätere Zeilen überschreiben frühere, wie bei MySQL)
+/// Values from configuration text (later lines override earlier ones, as in MySQL)
 pub fn parse(text: &str, c: &mut MysqlConf) {
     for l in text.lines() {
         let l = l.trim();

@@ -1,77 +1,64 @@
-# tyrosecd – der tyrosec-Agent (einsehbarer Quellcode)
+# tyrosecd – the tyrosec agent (viewable source code)
 
-*English summary below.*
+tyrosecd is the program that runs on your Linux server when you use [tyrosec](https://tyrosec.com). It watches files,
+logins, processes and connections and reports anomalies to the tyrosec central service, which analyses them and
+explains them in plain language.
 
-tyrosecd ist das Programm, das auf Ihrem Linux-Server läuft, wenn Sie [tyrosec](https://tyrosec.com) nutzen. Es
-beobachtet Dateien, Anmeldungen, Prozesse und Verbindungen und meldet Auffälligkeiten an die tyrosec-Zentrale, die sie
-auswertet und verständlich erklärt.
+Because the agent runs with far-reaching privileges, its source code is **viewable** here: you can review what it does
+– and verify that the official, signed binaries are built from exactly this code ([VERIFY.md](VERIFY.md)). This is
+**not open-source software**: review and private, non-commercial use without redistribution are permitted; anything
+else requires written consent ([LICENSE](LICENSE)).
 
-Weil der Agent mit weitreichenden Rechten läuft, ist sein Quellcode hier **einsehbar**: Sie können prüfen, was er tut –
-und nachrechnen, dass die offiziellen, signierten Programmdateien genau aus diesem Code entstehen
-([VERIFY.md](VERIFY.md)). Das ist **keine Open-Source-Software**: erlaubt sind Prüfen und private, nicht-gewerbliche
-Nutzung ohne Weitergabe – alles andere nur mit Zustimmung ([LICENSE](LICENSE)).
+## What the agent does
 
-## Was der Agent tut
-
-| Bereich | Wie |
+| Area | How |
 |---|---|
-| Dateien | Echtzeit-Überwachung (fanotify, sonst inotify) und regelmäßiger Abgleich: Prüfsummen, bei Code-/Konfigurationsdateien die Änderung als Diff; Zugangsdaten in Dateien werden vor dem Senden geschwärzt (`crates/core/src/redact.rs`) |
-| Anmeldungen | SSH-Anmeldungen aus Journal/Auth-Log, Website-Logins (z. B. WordPress) aus den Webserver-Logs |
-| Prozesse | Programmstarts (Proc-Connector des Kernels), auffällige Muster wie Reverse Shells oder Krypto-Miner |
-| Netz | Offene Ports, ausgehende Verbindungen, regelmäßige Kontakte (Beaconing); Domainnamen dazu aus DNS-Antworten |
-| Bestandsaufnahme | Pakete und Versionen (für Schwachstellen), Dienste, Container, Websites, TLS-Zertifikate, Messwerte (CPU, RAM, Platte) |
-| Prüfungen | Kompromittierungs-Check: veränderte Systemprogramme, verdächtige Autostarts, Rechte, Schadcode-Regeln (YARA) |
+| Files | Real-time monitoring (fanotify, otherwise inotify) plus periodic reconciliation: checksums, and for code and configuration files the change as a diff; credentials in files are redacted before anything is sent (`crates/core/src/redact.rs`) |
+| Logins | SSH logins from the journal/auth log, website logins (e.g. WordPress) from web server logs |
+| Processes | Program starts (kernel proc connector), suspicious patterns such as reverse shells or crypto miners |
+| Network | Open ports, outbound connections, regular contacts (beaconing); domain names for them from DNS responses |
+| Inventory | Packages and versions (for vulnerabilities), services, containers, websites, TLS certificates, metrics (CPU, RAM, disk) |
+| Checks | Compromise check: modified system binaries, suspicious autostart entries, permissions, malware rules (YARA) |
 
-## Was er sendet – und wohin
+## What it sends – and where
 
-Ausschließlich an die konfigurierte tyrosec-Zentrale (gegenseitig authentifiziertes TLS, Server-Zertifikat fest
-hinterlegt): die oben genannten Beobachtungen. Nicht gesendet werden u. a. Datenbank-Inhalte, Mails, Sitzungsdateien,
-Caches und Log-Inhalte von Anwendungen (diese Pfade werden gar nicht gelesen, siehe `crates/core/src/policy.rs`).
-Updates des Agenten und der Schadcode-Regeln werden nur installiert, wenn ihre Signatur (Ed25519 **und** P-256) gültig
-ist (`crates/transport/src/update.rs`).
+Only to the configured tyrosec central service (mutually authenticated TLS 1.3, server certificate pinned): the
+observations listed above. Not sent, among other things: database contents, mail, session files, caches and
+application log contents (these paths are not read at all, see `crates/core/src/policy.rs`).
 
-## Welche Rechte er hat
+Updates of the agent and of the malware rules are only installed if the manifest is validly signed with one of the
+built-in release keys (Ed25519, with key epochs: a newer key invalidates older ones) and the file checksums match
+(`crates/transport/src/update.rs`). The installer checks the same signature; on systems whose openssl cannot verify
+Ed25519 it falls back to a second signature made with P-256.
 
-Der Agent läuft als systemd-Dienst mit harten Grenzen (max. 256 MB RAM, ½ CPU-Kern, niedrigste Priorität) und in einem
-Sicherheitskäfig: System schreibgeschützt bis auf eigene Ordner, nur benötigte Fähigkeiten, eingeschränkte
-Systemaufrufe – jeweils mit Begründung in [install/install.sh](install/install.sh) (Abschnitt `write_unit`).
+## Which privileges it has
 
-## Was er nicht tut
+The agent runs as a systemd service with hard limits (max. 256 MB RAM, half a CPU core, lowest priority) inside a
+sandbox: the system is read-only except for the agent's own directories, only the required capabilities, restricted
+system calls – each with its justification in [install/install.sh](install/install.sh) (function `write_unit`).
 
-- **Er greift nicht ein**, solange Sie es nicht ausdrücklich erlauben: Sperren, Quarantäne oder Wiederherstellen
-  funktionieren nur, wenn Sie sie auf dem Server selbst mit `sudo tyrosecd actions enable …` freischalten
-  (`crates/cli/src/actions.rs`). Ohne diese Freigabe fehlen dem Dienst die nötigen Schreibrechte.
-- Er öffnet keine Ports und nimmt keine Befehle aus dem Internet entgegen; er baut nur Verbindungen zur Zentrale auf.
+## What it does not do
 
-## Aufbau
+- **It does not intervene** unless you explicitly allow it: blocking, quarantine or restore only work after you enable
+  them on the server itself with `sudo tyrosecd actions enable …` (`crates/cli/src/actions.rs`). Without this
+  approval the service lacks the necessary write permissions.
+- It opens no ports and accepts no commands from the internet; it only connects out to the central service.
 
-| Ordner | Inhalt |
+## Layout
+
+| Directory | Contents |
 |---|---|
-| `crates/cli` | Programm `tyrosecd`: Start, Anmeldung, Dienst, lokale Freigaben |
-| `crates/core` | Verarbeitung der Datei-Ereignisse, Regeln, Schwärzung, Zustand |
-| `crates/source-*` | Ereignisquellen: fanotify, inotify, Abgleich-Scan, Anmeldungen, Webserver-Logs |
-| `crates/detect` | Prozess- und Netzerkennung, Beaconing, DNS |
-| `crates/check` | Kompromittierungs-Check |
-| `crates/inventory` | Bestandsaufnahme |
-| `crates/transport` | Verbindung zur Zentrale, Spool, signierte Updates |
-| `crates/yara` | Schadcode-Regeln |
-| `install/install.sh` | Installer inkl. systemd-Unit |
-| `build/` | feste Build-Umgebung für den Nachbau |
+| `crates/cli` | The `tyrosecd` program: start-up, enrolment, service, local approvals |
+| `crates/core` | Processing of file events, rules, redaction, state |
+| `crates/source-*` | Event sources: fanotify, inotify, reconciliation scan, logins, web server logs |
+| `crates/detect` | Process and network detection, beaconing, DNS |
+| `crates/check` | Compromise check |
+| `crates/inventory` | Inventory |
+| `crates/transport` | Connection to the central service, spool, signed updates |
+| `crates/yara` | Malware rules |
+| `install/install.sh` | Installer including the systemd unit |
+| `build/` | Pinned build environment for rebuilding |
 
-## Sicherheitslücken melden
+## Reporting security issues
 
-Bitte nicht öffentlich, sondern wie in [SECURITY.md](SECURITY.md) beschrieben.
-
----
-
-## English summary
-
-tyrosecd is the agent of [tyrosec](https://tyrosec.com), a security service for Linux servers. It watches files,
-logins, processes and connections and reports to the tyrosec central service. Because it runs with far-reaching
-privileges, its source code is **viewable** here so you can review it and verify that the official signed binaries are
-built from exactly this code ([VERIFY.md](VERIFY.md)). This is **not open-source software**: review and private,
-non-commercial use without redistribution are permitted; anything else requires written consent ([LICENSE](LICENSE)).
-The agent only talks to the configured tyrosec central service (mutual TLS), installs only updates signed with both
-Ed25519 and P-256, runs in a hardened systemd sandbox with hard resource limits, and never takes action on the server
-(blocking, quarantine, restore) unless you enable it locally with `sudo tyrosecd actions enable …`.
-Report security issues as described in [SECURITY.md](SECURITY.md).
+Please not publicly – see [SECURITY.md](SECURITY.md).

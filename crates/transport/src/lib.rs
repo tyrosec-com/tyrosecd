@@ -1,11 +1,11 @@
-//! Transport Agent → Zentrale: Konfiguration, Enrollment, Spool mit
-//! Hash-Kette, Versand (HTTPS + mTLS, Protobuf, zstd), Heartbeat.
+//! Transport agent → central server: configuration, enrollment, spool with
+//! hash chain, sending (HTTPS + mTLS, protobuf, zstd), heartbeat.
 //!
-//! Grundsätze (Hauptplan 9, 10):
-//! - nur ausgehend, Port 443 (bzw. konfiguriert)
-//! - die Zentrale kann dem Agent KEINE Befehle schicken; Antworten enthalten
-//!   nur Bestätigungen und Inhaltsanforderungen für bereits überwachte Pfade
-//! - bei Verbindungsverlust puffert der Spool auf der Platte (begrenzt)
+//! Principles (main plan 9, 10):
+//! - outgoing only, port 443 (or as configured)
+//! - the central server can NOT send commands to the agent; responses contain
+//!   only acknowledgements and content requests for paths that are already monitored
+//! - on connection loss the spool buffers on disk (bounded)
 
 pub mod client;
 pub mod config;

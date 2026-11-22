@@ -1,37 +1,47 @@
-# Änderungen / Changelog
+# Changelog
 
-Jede Version hier entspricht genau dem Git-Tag `v<Version>` und der signierten Programmdatei unter
-`https://get.tyrosec.com/releases/<Version>/` (Nachbau: [VERIFY.md](VERIFY.md)).
+Each version listed here corresponds exactly to the Git tag `v<version>` and to the signed binary under
+`https://get.tyrosec.com/releases/<version>/` (rebuild: [VERIFY.md](VERIFY.md)).
+
+## 0.5.8
+
+- Hardening after external security reviews:
+  - Web server logs are only opened as regular files and non-blocking; in directories writable by users other than
+    root, a symbolic link as the log file is not followed.
+  - Malware-rule (YARA) checks never follow a symbolic link.
+  - Quarantine first moves the file name atomically to a random name in the same directory and only then verifies what
+    is removed.
+- Source code, comments, documentation and program messages in English.
+- Documentation states the update signature check precisely (agent: Ed25519 with key epochs; installer: Ed25519, or
+  P-256 on systems with an older openssl).
 
 ## 0.5.7
 
-- Quellcode erstmals einsehbar veröffentlicht; feste Build-Umgebung (`build/`) und Anleitung zum Nachbau.
-- Programmdateien enthalten keine Pfade der Build-Umgebung mehr (reproduzierbarer Build).
+- Source code published for the first time; pinned build environment (`build/`) and rebuild instructions.
+- Binaries no longer contain paths of the build environment (reproducible build).
 
 ## 0.5.6
 
-- Nachprüfung der Webroots nach einem Überlauf der Ereignis-Warteschlange in Etappen (höchstens 45 s am Stück),
-  Überläufe direkt nach dem Start ohne Nachprüfung.
-- Kurzlebige, leere Temp-Dateien (z. B. `mktemp`) werden nicht mehr einzeln gemeldet.
+- Re-check of web roots after an event-queue overflow runs in stages (at most 45 s at a time); overflows right after
+  start-up do not trigger a re-check.
+- Short-lived, empty temporary files (e.g. from `mktemp`) are no longer reported individually.
 
 ## 0.5.5
 
-- Domainnamen zu Zielen regelmäßiger Verbindungen (Beaconing) aus DNS-Antworten (nur lesen; neue systemd-Rechte
-  `AF_PACKET`, `CAP_NET_RAW`).
-- Website-Logins: eine allgemeine Umleitung (302) auf alles gilt nicht mehr als erfolgreiche Anmeldung.
-- Kompromittierungs-Check: Paketprüfung wird übersprungen, solange die Paketverwaltung läuft.
-- Installer: Download beim Upgrade ins eigene Datenverzeichnis, systemd-Unit nur bei Änderung schreiben.
+- Domain names for targets of regular outbound connections (beaconing) from DNS responses (read-only; new systemd
+  permissions `AF_PACKET`, `CAP_NET_RAW`).
+- Website logins: a generic redirect (302) for every request no longer counts as a successful login.
+- Compromise check: package verification is skipped while the package manager is running.
+- Installer: on upgrade, downloads go to the agent's own data directory; the systemd unit is only written when changed.
 
 ## 0.5.4
 
-- Build-Ausgaben (z. B. Next.js `.next/`) werden je Build zusammengefasst; Browser- und Compile-Caches in `/tmp`
-  ignoriert.
+- Build output (e.g. Next.js `.next/`) is summarised per build; browser and compile caches in `/tmp` are ignored.
 
 ## 0.5.3
 
-- Weniger Ereignisse je Schreibvorgang (nur fertig geschriebene Dateien), größere Kernel-Warteschlange,
-  Nachprüfung der Webroots nach einem Überlauf.
+- Fewer events per write (only completely written files), larger kernel queue, re-check of web roots after an overflow.
 
 ## 0.5.2
 
-- Stichprobe ausgehender Verbindungen für die Erkennung regelmäßiger Kontakte (Beaconing).
+- Sampling of outbound connections to detect regular contacts (beaconing).

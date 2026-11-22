@@ -1,5 +1,5 @@
-//! Letztes Backup erkennen (Plan „Ruhe“, Punkt 5): borg, restic, duplicity, Plesk, typische Backup-Ordner.
-//! Nur Zeitstempel und Pfade – keine Inhalte.
+//! Detect the latest backup (plan "quiet", item 5): borg, restic, duplicity, Plesk, typical backup directories.
+//! Only timestamps and paths – no contents.
 use serde::Serialize;
 use std::path::Path;
 
@@ -7,7 +7,7 @@ use std::path::Path;
 pub struct Backup {
     pub kind: String,
     pub path: String,
-    /// Unix-Zeit des jüngsten Backups
+    /// Unix time of the most recent backup
     pub last: i64,
 }
 
@@ -16,7 +16,7 @@ fn mtime(p: &Path) -> Option<i64> {
     std::fs::metadata(p).ok().map(|m| m.mtime())
 }
 
-/// jüngste Änderungszeit einer passenden Datei in `dir` (eine Ebene, plus eine Unterebene)
+/// most recent modification time of a matching file in `dir` (one level, plus one sublevel)
 fn newest(dir: &Path, depth: u8, pred: &dyn Fn(&str) -> bool) -> Option<i64> {
     let mut best = None;
     for e in std::fs::read_dir(dir).ok()?.flatten().take(5000) {
@@ -44,7 +44,7 @@ fn homes(root: &str) -> Vec<std::path::PathBuf> {
 
 fn archive(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
-    // /var/backups enthält Debian-Hausmüll (dpkg, apt, passwd-Kopien) – das ist kein Backup
+    // /var/backups contains Debian housekeeping files (dpkg, apt, passwd copies) – that is not a backup
     if ["dpkg.", "apt.", "alternatives.", "passwd", "group", "shadow", "gshadow", "aptitude.", "infodir."].iter().any(|p| n.starts_with(p)) {
         return false;
     }
@@ -61,7 +61,7 @@ pub fn detect(root: &str) -> Vec<Backup> {
         }
     };
     for h in homes(root) {
-        // borg: security/<repo-id>/manifest-timestamp wird bei jedem Backup geschrieben (auch bei entfernten Repos)
+        // borg: security/<repo-id>/manifest-timestamp is written on every backup (also for remote repos)
         let sec = h.join(".config/borg/security");
         if let Ok(rd) = std::fs::read_dir(&sec) {
             for e in rd.flatten().take(50) {
@@ -70,22 +70,22 @@ pub fn detect(root: &str) -> Vec<Backup> {
                 add("borg", Path::new(if loc.trim().is_empty() { sec.to_str().unwrap_or("") } else { loc.trim() }), mtime(&ts));
             }
         }
-        // restic: Cache je Repository, Snapshots-Ordner wird bei jedem Lauf aktualisiert
+        // restic: cache per repository, the snapshots directory is updated on every run
         let rc = h.join(".cache/restic");
         if let Ok(rd) = std::fs::read_dir(&rc) {
             for e in rd.flatten().take(50) {
                 add("restic", &rc, newest(&e.path().join("snapshots"), 0, &|_| true).or(mtime(&e.path().join("snapshots"))));
             }
         }
-        // duplicity: Manifeste im Cache
+        // duplicity: manifests in the cache
         let dc = h.join(".cache/duplicity");
         if dc.is_dir() {
             add("duplicity", &dc, newest(&dc, 1, &|n| n.contains("manifest")));
         }
     }
-    // Plesk, ISPConfig, typische Ordner
-    for (kind, dir, depth) in [("plesk", "/var/lib/psa/dumps", 2u8), ("ispconfig", "/var/backup", 2), ("ordner", "/backup", 2), ("ordner", "/backups", 2),
-        ("ordner", "/var/backups", 1), ("automysqlbackup", "/var/lib/automysqlbackup", 2), ("ordner", "/srv/backup", 2), ("ordner", "/home/backup", 2)]
+    // Plesk, ISPConfig, typical directories
+    for (kind, dir, depth) in [("plesk", "/var/lib/psa/dumps", 2u8), ("ispconfig", "/var/backup", 2), ("folder", "/backup", 2), ("folder", "/backups", 2),
+        ("folder", "/var/backups", 1), ("automysqlbackup", "/var/lib/automysqlbackup", 2), ("folder", "/srv/backup", 2), ("folder", "/home/backup", 2)]
     {
         let p = r(dir);
         if p.is_dir() {

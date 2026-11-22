@@ -1,17 +1,17 @@
-//! Persistente Warteschlange (Spool) mit Hash-Kette.
+//! Persistent queue (spool) with a hash chain.
 //!
-//! Jede Nachricht bekommt beim Einreihen eine lückenlose `seq` und
-//! `prev_hash` = SHA-256 der kodierten Vorgänger-Envelope. Die Kette läuft
-//! über Neustarts weiter (Zustand in derselben Datei). Gelöscht wird erst,
-//! wenn die Zentrale bis zu einer `seq` bestätigt hat.
+//! Every message gets a gapless `seq` when enqueued and
+//! `prev_hash` = SHA-256 of the encoded predecessor envelope. The chain continues
+//! across restarts (state in the same file). Deletion happens only
+//! once the central server has acknowledged up to a `seq`.
 //!
-//! Harte Grenze: Ist die Zentrale lange nicht erreichbar, wächst der Spool nicht, bis die Platte voll ist.
-//! Über der Grenze (`spool_max_mb`, höchstens 10 % des freien Platzes) werden die **ältesten** Nachrichten
-//! verworfen – zuerst Datei-Ereignisse, Inhalte, Metriken und Inventar, erst danach Anmeldungen, Erkennungen,
-//! Check-Berichte, Aktions-Ergebnisse und Lebenszeichen. Die Kette bleibt dabei lückenlos: alles ab der ersten
-//! verworfenen Nachricht wird neu nummeriert und verkettet (nie Nachrichten, die gerade unterwegs sind), und
-//! danach folgt eine Lifecycle-Nachricht `spool_dropped` mit der Zahl der verworfenen Nachrichten
-//! (`detail` = „dropped=N bytes=B total=T limit_mb=L“) – die Zentrale sieht so den Verlust.
+//! Hard limit: if the central server is unreachable for a long time, the spool does not grow until the disk is full.
+//! Above the limit (`spool_max_mb`, at most 10 % of the free space) the **oldest** messages are
+//! discarded – file events, contents, metrics and inventory first, only then logins, detections,
+//! check reports, action results and heartbeats. The chain stays gapless: everything from the first
+//! discarded message on is renumbered and re-chained (never messages currently in flight), and
+//! then a lifecycle message `spool_dropped` follows with the number of discarded messages
+//! (`detail` = "dropped=N bytes=B total=T limit_mb=L") – so the central server sees the loss.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -25,28 +25,28 @@ use tyrosd_proto::{envelope::Body, Envelope};
 const ITEMS: TableDefinition<u64, &[u8]> = TableDefinition::new("items");
 const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 
-/// Standard der harten Grenze (agent.toml `spool_max_mb`)
+/// default of the hard limit (agent.toml `spool_max_mb`)
 pub const DEFAULT_HARD_MAX: u64 = 512 * 1024 * 1024;
-/// kleinste harte Grenze (Konfiguration)
+/// smallest hard limit (configuration)
 const MIN_HARD_MAX: u64 = 64 * 1024;
-/// Untergrenze der aus dem freien Platz abgeleiteten Grenze (sonst ginge bei fast voller Platte gar nichts mehr)
+/// lower bound of the limit derived from free space (otherwise nothing would work on an almost full disk)
 const DISK_FLOOR: u64 = 4 * 1024 * 1024;
-/// Nach dem Verwerfen ist der Spool höchstens so voll (Prozent der Grenze) – damit das Neuverketten selten ist
+/// after discarding, the spool is at most this full (percent of the limit) – so that re-chaining is rare
 const DROP_TARGET_PCT: u64 = 80;
-/// so oft wird der freie Platz neu bestimmt
+/// how often the free space is re-determined
 const DISK_RECHECK: Duration = Duration::from_secs(60);
 
 struct Chain {
-    /// letzte seq
+    /// last seq
     seq: u64,
-    /// Hash der letzten Envelope
+    /// hash of the last envelope
     hash: Vec<u8>,
-    /// belegte Bytes (kodierte Envelopes)
+    /// bytes used (encoded envelopes)
     bytes: u64,
-    /// höchste seq, die der Versand gelesen und die Zentrale noch nicht bestätigt hat – bis dahin wird nichts
-    /// verworfen oder umnummeriert
+    /// highest seq that the sender has read and the central server has not yet acknowledged – up to it nothing is
+    /// discarded or renumbered
     inflight: u64,
-    /// wirksame harte Grenze und Zeitpunkt ihrer Bestimmung
+    /// effective hard limit and the time it was determined
     cap: u64,
     cap_at: Option<Instant>,
 }
@@ -54,9 +54,9 @@ struct Chain {
 pub struct Spool {
     db: Database,
     chain: Mutex<Chain>,
-    /// weiche Grenze: darüber werden Inhalte/Diffs weggelassen
+    /// soft limit: above it contents/diffs are omitted
     pub max_bytes: u64,
-    /// harte Grenze (konfiguriert); wirksam ist zusätzlich höchstens 10 % des freien Platzes
+    /// hard limit (configured); additionally at most 10 % of the free space is effective
     pub hard_max: u64,
     dir: String,
 }
@@ -66,7 +66,7 @@ pub struct SpoolStats {
     pub items: u64,
     pub bytes: u64,
     pub last_seq: u64,
-    /// insgesamt wegen der harten Grenze verworfene Nachrichten (seit Anlage des Spools)
+    /// messages discarded in total because of the hard limit (since the spool was created)
     pub dropped_total: u64,
 }
 
@@ -74,8 +74,8 @@ fn u64_from(b: &[u8]) -> u64 {
     b.try_into().map(u64::from_le_bytes).unwrap_or(0)
 }
 
-/// Wirksame harte Grenze: konfiguriert, aber höchstens 10 % des freien Platzes (die eigenen Bytes zählen als frei,
-/// sonst schrumpfte die Grenze mit dem eigenen Wachstum), dabei mindestens `DISK_FLOOR`.
+/// Effective hard limit: configured, but at most 10 % of the free space (our own bytes count as free,
+/// otherwise the limit would shrink as we grow), and at least `DISK_FLOOR`.
 pub fn effective_cap(hard_max: u64, disk_free: Option<u64>, own_bytes: u64) -> u64 {
     match disk_free {
         Some(f) => hard_max.min((f.saturating_add(own_bytes) / 10).max(DISK_FLOOR)),
@@ -83,10 +83,10 @@ pub fn effective_cap(hard_max: u64, disk_free: Option<u64>, own_bytes: u64) -> u
     }
 }
 
-/// freier Platz (für Nicht-root verfügbar) auf dem Dateisystem von `dir`
+/// free space (available to non-root) on the file system of `dir`
 fn disk_free(dir: &str) -> Option<u64> {
     let c = std::ffi::CString::new(dir).ok()?;
-    // SAFETY: gültiger C-String und Zeiger, Rückgabe geprüft
+    // SAFETY: valid C string and pointer, return value checked
     let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
     if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
         return None;
@@ -94,7 +94,7 @@ fn disk_free(dir: &str) -> Option<u64> {
     Some((st.f_bavail as u64).saturating_mul(st.f_frsize as u64))
 }
 
-/// Feldnummer des Inhalts (oneof `body`, Tags 10–18) aus der kodierten Envelope, ohne alles zu dekodieren
+/// Field number of the content (oneof `body`, tags 10–18) from the encoded envelope, without decoding everything
 fn body_tag(raw: &[u8]) -> Option<u32> {
     fn varint(b: &[u8], i: &mut usize) -> Option<u64> {
         let mut v = 0u64;
@@ -131,8 +131,8 @@ fn body_tag(raw: &[u8]) -> Option<u32> {
     None
 }
 
-/// Länger behalten: Lebenszeichen (13), Check (14), Anmeldung (15), Erkennung (17), Aktions-Ergebnis (18), Unbekanntes.
-/// Zuerst verwerfen: Datei-Ereignis (10), Inhalt (11), Metriken (12), Inventar (16).
+/// Kept longer: heartbeat (13), check (14), login (15), detection (17), action result (18), unknown.
+/// Discarded first: file event (10), content (11), metrics (12), inventory (16).
 fn important(raw: &[u8]) -> bool {
     !matches!(body_tag(raw), Some(10 | 11 | 12 | 16))
 }
@@ -142,7 +142,7 @@ impl Spool {
         Self::open_limited(path, max_bytes, DEFAULT_HARD_MAX)
     }
 
-    /// `max_bytes` = weiche Grenze (Inhalte weglassen), `hard_max` = harte Grenze (älteste Nachrichten verwerfen)
+    /// `max_bytes` = soft limit (omit contents), `hard_max` = hard limit (discard oldest messages)
     pub fn open_limited(path: &str, max_bytes: u64, hard_max: u64) -> Result<Spool> {
         let dir = match std::path::Path::new(path).parent() {
             Some(d) if !d.as_os_str().is_empty() => {
@@ -171,7 +171,7 @@ impl Spool {
         Ok(Spool { db, chain: Mutex::new(chain), max_bytes, hard_max, dir })
     }
 
-    /// wirksame harte Grenze (freier Platz höchstens jede Minute neu bestimmt)
+    /// effective hard limit (free space re-determined at most once per minute)
     fn cap(&self, c: &mut Chain) -> u64 {
         if c.cap_at.is_none_or(|t| t.elapsed() >= DISK_RECHECK) {
             c.cap = effective_cap(self.hard_max, disk_free(&self.dir), c.bytes);
@@ -180,7 +180,7 @@ impl Spool {
         c.cap
     }
 
-    /// Nachricht einreihen. Liefert die vergebene `seq`.
+    /// Enqueue a message. Returns the assigned `seq`.
     pub fn push(&self, ts_ns: i64, body: Body) -> Result<u64> {
         let mut c = self.chain.lock().unwrap();
         let mut env = Envelope { seq: 0, prev_hash: c.hash.clone(), ts_ns, body: Some(body) };
@@ -193,7 +193,7 @@ impl Spool {
             if n > 0 {
                 let total = self.meta_u64("dropped_total") + n;
                 eprintln!(
-                    "[tyrosecd] Spool voll (Grenze {} KB, Zentrale nicht erreichbar?): {n} älteste Nachrichten ({} KB) verworfen",
+                    "[tyrosecd] spool full (limit {} KB, central service unreachable?): {n} oldest messages ({} KB) dropped",
                     cap >> 10,
                     freed >> 10
                 );
@@ -212,7 +212,7 @@ impl Spool {
         let enc = env.encode_to_vec();
         let hash = sha2::Sha256::digest(&enc).to_vec();
         let mut txn = self.db.begin_write()?;
-        // Gruppen-Commit: dauerhaft (fsync) macht `sync()` im Versand-Thread (≤ 1 s)
+        // group commit: durability (fsync) is done by `sync()` in the sender thread (≤ 1 s)
         txn.set_durability(Durability::None);
         {
             let mut t = txn.open_table(ITEMS)?;
@@ -232,15 +232,15 @@ impl Spool {
         Ok(env.seq)
     }
 
-    /// Mindestens `need` Bytes durch Verwerfen der ältesten Nachrichten frei machen – zuerst unwichtige, erst wenn die
-    /// nicht reichen auch wichtige. Nachrichten im Versand (`inflight`) bleiben unberührt. Alles ab der ersten
-    /// verworfenen Nachricht wird lückenlos neu nummeriert und verkettet. Liefert (Anzahl, Bytes).
+    /// Free at least `need` bytes by discarding the oldest messages – unimportant ones first, important ones only if
+    /// those are not enough. Messages in flight (`inflight`) stay untouched. Everything from the first
+    /// discarded message on is renumbered and re-chained without gaps. Returns (count, bytes).
     fn drop_oldest(&self, c: &mut Chain, need: u64) -> Result<(u64, u64)> {
         if need == 0 {
             return Ok((0, 0));
         }
         let from = c.inflight + 1;
-        // 1. Durchgang (nur lesen): wie viel ist bei den unwichtigen zu holen?
+        // 1st pass (read-only): how much can be gained from the unimportant ones?
         let low_total = {
             let r = self.db.begin_read()?;
             let t = r.open_table(ITEMS)?;
@@ -256,7 +256,7 @@ impl Spool {
         let need_low = need.min(low_total);
         let need_high = need - need_low;
         let (mut freed_low, mut freed_high, mut n) = (0u64, 0u64, 0u64);
-        // neue Nummer und Vorgänger-Hash (gesetzt ab der ersten verworfenen Nachricht)
+        // new number and predecessor hash (set from the first discarded message on)
         let mut rechain: Option<(u64, Vec<u8>)> = None;
         let mut txn = self.db.begin_write()?;
         txn.set_durability(Durability::None);
@@ -264,7 +264,8 @@ impl Spool {
             let mut t = txn.open_table(ITEMS)?;
             let mut cursor = from;
             loop {
-                // stückweise lesen (nie den ganzen Spool im Speicher); neue Nummern sind ≤ alte, liegen also hinter `cursor`
+                // read piece by piece (never the whole spool in memory); new numbers are ≤ old ones,
+                // so they lie behind `cursor`
                 let chunk: Vec<(u64, Vec<u8>)> =
                     t.range(cursor..)?.take(512).filter_map(|r| r.ok()).map(|(k, v)| (k.value(), v.value().to_vec())).collect();
                 let Some(last) = chunk.last().map(|x| x.0) else { break };
@@ -285,7 +286,7 @@ impl Spool {
                     };
                     if drop {
                         if rechain.is_none() {
-                            // Kette ab hier: gleiche seq und derselbe Vorgänger wie die erste verworfene Nachricht
+                            // chain from here: same seq and same predecessor as the first discarded message
                             let e = Envelope::decode(raw.as_slice())?;
                             rechain = Some((k, e.prev_hash));
                         }
@@ -293,10 +294,10 @@ impl Spool {
                         n += 1;
                         continue;
                     }
-                    let Some((next, prev)) = rechain.as_mut() else { continue }; // vor der ersten Lücke: unverändert
+                    let Some((next, prev)) = rechain.as_mut() else { continue }; // before the first gap: unchanged
                     t.remove(k)?;
                     let Ok(mut e) = Envelope::decode(raw.as_slice()) else {
-                        // unlesbar: mitverwerfen statt die Kette zu brechen
+                        // unreadable: discard it too instead of breaking the chain
                         freed_low += len;
                         n += 1;
                         continue;
@@ -305,7 +306,7 @@ impl Spool {
                     e.prev_hash = std::mem::take(prev);
                     let enc = e.encode_to_vec();
                     t.insert(*next, enc.as_slice())?;
-                    // Größe kann sich minimal ändern (kürzere seq-Varint)
+                    // size may change slightly (shorter seq varint)
                     freed_low += len;
                     freed_low = freed_low.saturating_sub(enc.len() as u64);
                     *prev = sha2::Sha256::digest(&enc).to_vec();
@@ -343,7 +344,7 @@ impl Spool {
             .unwrap_or(0)
     }
 
-    /// Alles bisher Eingereihte dauerhaft machen (fsync).
+    /// Make everything enqueued so far durable (fsync).
     pub fn sync(&self) -> Result<()> {
         let mut txn = self.db.begin_write()?;
         txn.set_durability(Durability::Immediate);
@@ -351,15 +352,15 @@ impl Spool {
         Ok(())
     }
 
-    /// Ist noch Platz für eine Nachricht dieser Größe (mit Inhalt/Diff)?
+    /// Is there still room for a message of this size (with content/diff)?
     pub fn has_room(&self, n: usize) -> bool {
         let mut c = self.chain.lock().unwrap();
         let cap = self.cap(&mut c);
         c.bytes + n as u64 <= self.max_bytes.min(cap)
     }
 
-    /// Älteste Nachrichten (bereits kodiert) bis zu den Grenzen. Sie gelten bis zum nächsten `ack` als unterwegs
-    /// und werden bis dahin weder verworfen noch umnummeriert.
+    /// Oldest messages (already encoded) up to the limits. They count as in flight until the next `ack`
+    /// and are neither discarded nor renumbered until then.
     pub fn peek(&self, max_items: usize, max_bytes: usize) -> Result<Vec<(u64, Vec<u8>)>> {
         let mut c = self.chain.lock().unwrap();
         let r = self.db.begin_read()?;
@@ -381,7 +382,7 @@ impl Spool {
         Ok(out)
     }
 
-    /// Alles bis einschließlich `seq` entfernen (von der Zentrale bestätigt).
+    /// Remove everything up to and including `seq` (acknowledged by the central server).
     pub fn ack(&self, seq: u64) -> Result<u64> {
         let mut c = self.chain.lock().unwrap();
         let mut freed = 0u64;
@@ -405,7 +406,8 @@ impl Spool {
         }
         txn.commit()?;
         c.bytes = c.bytes.saturating_sub(freed);
-        // Antwort der Zentrale liegt vor: nichts mehr unterwegs (der Versand liest erst danach erneut)
+        // the central server's response has arrived: nothing in flight any more
+        // (the sender reads again only afterwards)
         c.inflight = 0;
         Ok(n)
     }
@@ -423,17 +425,17 @@ impl Spool {
     }
 }
 
-/// Prüft eine Folge von Envelopes (für Tests und den Ingest).
+/// Verifies a sequence of envelopes (for tests and the ingest).
 pub fn verify_chain(prev_seq: u64, prev_hash: &[u8], items: &[Vec<u8>]) -> std::result::Result<(u64, Vec<u8>), String> {
     let mut seq = prev_seq;
     let mut hash = prev_hash.to_vec();
     for raw in items {
         let e = Envelope::decode(raw.as_slice()).map_err(|e| e.to_string())?;
         if e.seq != seq + 1 {
-            return Err(format!("Lücke: erwartet seq {}, erhalten {}", seq + 1, e.seq));
+            return Err(format!("gap: expected seq {}, got {}", seq + 1, e.seq));
         }
         if e.prev_hash != hash {
-            return Err(format!("Kette gebrochen bei seq {}", e.seq));
+            return Err(format!("chain broken at seq {}", e.seq));
         }
         seq = e.seq;
         hash = sha2::Sha256::digest(raw).to_vec();
@@ -475,11 +477,11 @@ mod tests {
         assert_eq!(s.push(3, body("b")).unwrap(), 3);
         let items: Vec<Vec<u8>> = s.peek(10, 1 << 20).unwrap().into_iter().map(|(_, v)| v).collect();
         assert_eq!(items.len(), 3);
-        let (seq, _) = verify_chain(0, &[], &items).expect("Kette gültig");
+        let (seq, _) = verify_chain(0, &[], &items).expect("chain valid");
         assert_eq!(seq, 3);
         assert_eq!(s.ack(2).unwrap(), 2);
         assert_eq!(s.stats().items, 1);
-        // Manipulation erkennen: mittleres Element verändern
+        // detect tampering: modify the middle element
         let mut bad = items.clone();
         let last = bad[1].len() - 1;
         bad[1][last] ^= 1;
@@ -490,11 +492,11 @@ mod tests {
     fn cap_limited_by_free_disk() {
         assert_eq!(effective_cap(512 << 20, None, 0), 512 << 20);
         assert_eq!(effective_cap(512 << 20, Some(100 << 30), 0), 512 << 20);
-        // 1 GiB frei + 0 eigene → 100 MiB (10 %)
+        // 1 GiB free + 0 own → 100 MiB (10 %)
         assert_eq!(effective_cap(512 << 20, Some(1 << 30), 0) >> 20, 102);
-        // eigene Bytes zählen als frei
+        // own bytes count as free
         assert_eq!(effective_cap(512 << 20, Some(900 << 20), 100 << 20), 100 << 20);
-        // fast voll: Untergrenze
+        // almost full: lower bound
         assert_eq!(effective_cap(512 << 20, Some(1 << 20), 0), DISK_FLOOR);
     }
 
@@ -518,20 +520,20 @@ mod tests {
             s.push(2 + i as i64, file(i)).unwrap();
         }
         let st = s.stats();
-        assert!(st.bytes <= 64 * 1024, "Grenze eingehalten: {}", st.bytes);
+        assert!(st.bytes <= 64 * 1024, "limit respected: {}", st.bytes);
         assert!(st.dropped_total > 100);
         let items = all(&s);
-        // Kette lückenlos ab dem Anfang (nichts bestätigt) – keine Kettenlücke bei der Zentrale
-        let (seq, _) = verify_chain(0, &[], &items).expect("Kette gültig");
+        // chain gapless from the start (nothing acknowledged) – no chain gap at the central server
+        let (seq, _) = verify_chain(0, &[], &items).expect("chain valid");
         assert_eq!(seq, s.stats().last_seq);
         assert_eq!(items.len() as u64, s.stats().items);
         let envs: Vec<Envelope> = items.iter().map(|r| Envelope::decode(r.as_slice()).unwrap()).collect();
-        // Anmeldung (älteste Nachricht) überlebt, älteste Datei-Ereignisse sind weg, jüngstes bleibt
+        // login (oldest message) survives, oldest file events are gone, the newest remains
         assert!(matches!(&envs[0].body, Some(Body::Login(_))));
         let paths: Vec<&str> = envs.iter().filter_map(|e| if let Some(Body::File(f)) = &e.body { Some(f.path.as_str()) } else { None }).collect();
         assert!(!paths.iter().any(|p| p.starts_with("/var/www/0/")));
         assert!(paths.last().unwrap().starts_with("/var/www/199/"));
-        // Vermerk(e) mit Zahl; Summe = insgesamt verworfen
+        // note(s) with count; sum = total discarded
         let marks: Vec<u64> = envs
             .iter()
             .filter_map(|e| match &e.body {
@@ -543,11 +545,11 @@ mod tests {
             .collect();
         assert!(!marks.is_empty());
         assert_eq!(marks.iter().sum::<u64>(), st.dropped_total);
-        // nach Neustart weiter lückenlos
+        // still gapless after a restart
         drop(s);
         let s = Spool::open_limited(&p, 1 << 20, 64 * 1024).unwrap();
         s.push(999, body("start")).unwrap();
-        verify_chain(0, &[], &all(&s)).expect("Kette nach Neustart gültig");
+        verify_chain(0, &[], &all(&s)).expect("chain valid after restart");
     }
 
     #[test]
@@ -558,20 +560,20 @@ mod tests {
         for i in 0..5 {
             s.push(i, file(i as usize)).unwrap();
         }
-        // Versand hat die ersten 5 gelesen, Antwort steht aus
+        // the sender has read the first 5, response pending
         let sent = s.peek(5, 1 << 20).unwrap();
-        // nur noch wichtige Nachrichten → müssen (älteste zuerst) weichen
+        // only important messages left → they must give way (oldest first)
         for i in 0..400 {
             s.push(10 + i, Body::Login(LoginEvent { service: "ssh".into(), user: format!("u{i}-{}", "y".repeat(400)), ip: "198.51.100.1".into(), ..Default::default() }))
                 .unwrap();
         }
         let now = s.peek(usize::MAX, usize::MAX).unwrap();
-        // die 5 unterwegs sind unverändert (gleiche seq, gleiche Bytes)
+        // the 5 in flight are unchanged (same seq, same bytes)
         assert_eq!(&now[..5], &sent[..]);
         let items: Vec<Vec<u8>> = now.into_iter().map(|(_, v)| v).collect();
-        verify_chain(0, &[], &items).expect("Kette gültig");
+        verify_chain(0, &[], &items).expect("chain valid");
         assert!(s.stats().bytes <= 64 * 1024 + 8 * 1024);
-        // Zentrale bestätigt die 5 → danach darf auch der Anfang verworfen werden
+        // the central server acknowledges the 5 → afterwards the beginning may be discarded too
         s.ack(5).unwrap();
         assert!(s.stats().dropped_total > 0);
     }

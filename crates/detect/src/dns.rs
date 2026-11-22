@@ -1,19 +1,19 @@
-//! Domainnamen zu Ziel-Adressen (Beaconing-Funde lesbar machen, 20.11.2026): DNS-Antworten am Server mitlesen und
-//! „Adresse → angefragter Name“ im Speicher halten. Praxisfall: drei Adressen bei Billig-Hostern, die
-//! Rückwärtsauflösung liefert nichts – gefragt hatte der Server aber nach „ip-lookup.example“.
+//! Domain names for destination addresses (make beaconing findings readable, 2026-11-20): sniff DNS responses on the
+//! server and keep "address → queried name" in memory. Real case: three addresses at budget hosters, reverse
+//! resolution returns nothing – but the server had asked for "ip-lookup.example".
 //!
-//! Nur lesen: ein Paket-Socket (AF_PACKET, braucht CAP_NET_RAW) mit Kernel-Filter, der ausschließlich eingehende
-//! UDP-Pakete von Port 53 durchlässt (IPv4/IPv6, keine Fragmente). Ausgewertet werden nur Antworten mit A/AAAA-
-//! Einträgen; gespeichert wird je Adresse der zuletzt erfragte Name (höchstens `MAX_NAMES`, nur im Speicher). An die
-//! Zentrale gehen Namen nur für Ziele, die in der Beaconing-Stichprobe auftauchen. DNS über TLS/HTTPS bleibt
-//! unsichtbar (dann eben kein Name).
+//! Read only: a packet socket (AF_PACKET, requires CAP_NET_RAW) with a kernel filter that passes only incoming
+//! UDP packets from port 53 (IPv4/IPv6, no fragments). Only responses with A/AAAA records are evaluated;
+//! per address the most recently queried name is stored (at most `MAX_NAMES`, in memory only). Names are sent
+//! to the server only for destinations that appear in the beaconing sample. DNS over TLS/HTTPS stays
+//! invisible (then simply no name).
 
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// höchstens so viele Adressen im Speicher (älteste Hälfte fällt beim Überschreiten weg)
+/// at most this many addresses in memory (the oldest half is dropped when exceeded)
 pub const MAX_NAMES: usize = 8192;
 
 struct Names {
@@ -23,7 +23,7 @@ struct Names {
 
 static NAMES: Mutex<Option<Names>> = Mutex::new(None);
 
-/// zuletzt per DNS erfragter Name für eine Adresse
+/// most recently queried DNS name for an address
 pub fn name_of(ip: &IpAddr) -> Option<String> {
     NAMES.lock().ok()?.as_ref()?.map.get(ip).map(|(n, _)| n.clone())
 }
@@ -44,7 +44,7 @@ fn u16_at(b: &[u8], i: usize) -> Option<u16> {
     Some(u16::from_be_bytes([*b.get(i)?, *b.get(i + 1)?]))
 }
 
-/// Name ab `pos` lesen (mit Kompressionszeigern). Liefert (Name, Position nach dem Namen im ursprünglichen Ablauf).
+/// Read a name at `pos` (with compression pointers). Returns (name, position after the name in the original flow).
 fn read_name(msg: &[u8], mut pos: usize) -> Option<(String, usize)> {
     let mut out = String::new();
     let mut end = None;
@@ -57,7 +57,7 @@ fn read_name(msg: &[u8], mut pos: usize) -> Option<(String, usize)> {
             let ptr = ((len & 0x3f) << 8) | *msg.get(pos + 1)? as usize;
             end.get_or_insert(pos + 2);
             if ptr >= pos {
-                return None; // nur rückwärts (keine Schleifen)
+                return None; // backwards only (no loops)
             }
             pos = ptr;
             continue;
@@ -81,11 +81,11 @@ fn read_name(msg: &[u8], mut pos: usize) -> Option<(String, usize)> {
     None
 }
 
-/// DNS-Antwort (ab DNS-Kopf) → (Adresse, erfragter Name) für alle A/AAAA-Einträge
+/// DNS response (from the DNS header) → (address, queried name) for all A/AAAA records
 pub fn parse_dns(msg: &[u8]) -> Vec<(IpAddr, String)> {
     let mut out = Vec::new();
     let (Some(flags), Some(qd), Some(an)) = (u16_at(msg, 2), u16_at(msg, 4), u16_at(msg, 6)) else { return out };
-    // Antwort (QR), ohne Fehler (RCODE 0), genau eine Frage (üblich), höchstens 64 Antworten
+    // response (QR), no error (RCODE 0), exactly one question (usual), at most 64 answers
     if flags & 0x8000 == 0 || flags & 0x000f != 0 || qd != 1 || an == 0 || an > 64 {
         return out;
     }
@@ -93,7 +93,7 @@ pub fn parse_dns(msg: &[u8]) -> Vec<(IpAddr, String)> {
     if qname.is_empty() || !qname.contains('.') {
         return out;
     }
-    pos += 4; // Typ, Klasse
+    pos += 4; // type, class
     for _ in 0..an {
         let Some((_, p)) = read_name(msg, pos) else { break };
         let (Some(typ), Some(rdlen)) = (u16_at(msg, p), u16_at(msg, p + 8)) else { break };
@@ -112,7 +112,7 @@ pub fn parse_dns(msg: &[u8]) -> Vec<(IpAddr, String)> {
     out
 }
 
-/// IP-Paket (ab Netzwerk-Kopf, wie ein SOCK_DGRAM-Paket-Socket es liefert) → DNS-Antwort-Einträge
+/// IP packet (from the network header, as delivered by a SOCK_DGRAM packet socket) → DNS answer records
 pub fn parse_packet(pkt: &[u8]) -> Vec<(IpAddr, String)> {
     let Some(v) = pkt.first().map(|b| b >> 4) else { return Vec::new() };
     let udp = match v {
@@ -126,8 +126,8 @@ pub fn parse_packet(pkt: &[u8]) -> Vec<(IpAddr, String)> {
     pkt.get(udp + 8..).map(parse_dns).unwrap_or_default()
 }
 
-/// Kernel-Filter (klassisches BPF): nur nicht-ausgehende UDP-Pakete mit Quellport 53, IPv4 ohne Fragmente oder IPv6
-/// ohne Erweiterungs-Köpfe. Alles andere erreicht den Agent gar nicht.
+/// Kernel filter (classic BPF): only non-outgoing UDP packets with source port 53, IPv4 without fragments or IPv6
+/// without extension headers. Nothing else reaches the agent at all.
 #[cfg(target_os = "linux")]
 fn filter() -> Vec<libc::sock_filter> {
     const LD_W_ABS: u16 = 0x20;
@@ -143,47 +143,47 @@ fn filter() -> Vec<libc::sock_filter> {
     let i = |code, jt, jf, k| libc::sock_filter { code, jt, jf, k };
     vec![
         i(LD_W_ABS, 0, 0, AD_PKTTYPE), //  0
-        i(JEQ_K, 15, 0, 4),            //  1 PACKET_OUTGOING → verwerfen (17)
+        i(JEQ_K, 15, 0, 4),            //  1 PACKET_OUTGOING → drop (17)
         i(LD_W_ABS, 0, 0, AD_PROTOCOL), // 2
-        i(JEQ_K, 0, 7, 0x0800),        //  3 IPv4? sonst → 11
-        i(LD_B_ABS, 0, 0, 9),          //  4 Protokoll
-        i(JEQ_K, 0, 11, 17),           //  5 UDP? sonst → 17
-        i(LD_H_ABS, 0, 0, 6),          //  6 Fragment-Feld
-        i(JSET_K, 9, 0, 0x1fff),       //  7 Fragment → 17
-        i(LDX_B_MSH, 0, 0, 0),         //  8 X = Länge IP-Kopf
-        i(LD_H_IND, 0, 0, 0),          //  9 UDP-Quellport
-        i(JEQ_K, 5, 6, 53),            // 10 53 → 16, sonst → 17
-        i(JEQ_K, 0, 5, 0x86dd),        // 11 IPv6? sonst → 17
+        i(JEQ_K, 0, 7, 0x0800),        //  3 IPv4? else → 11
+        i(LD_B_ABS, 0, 0, 9),          //  4 protocol
+        i(JEQ_K, 0, 11, 17),           //  5 UDP? else → 17
+        i(LD_H_ABS, 0, 0, 6),          //  6 fragment field
+        i(JSET_K, 9, 0, 0x1fff),       //  7 fragment → 17
+        i(LDX_B_MSH, 0, 0, 0),         //  8 X = IP header length
+        i(LD_H_IND, 0, 0, 0),          //  9 UDP source port
+        i(JEQ_K, 5, 6, 53),            // 10 53 → 16, else → 17
+        i(JEQ_K, 0, 5, 0x86dd),        // 11 IPv6? else → 17
         i(LD_B_ABS, 0, 0, 6),          // 12 Next Header
-        i(JEQ_K, 0, 3, 17),            // 13 UDP? sonst → 17
-        i(LD_H_ABS, 0, 0, 40),         // 14 UDP-Quellport
-        i(JEQ_K, 0, 1, 53),            // 15 53 → 16, sonst → 17
-        i(RET_K, 0, 0, 2048),          // 16 annehmen (max. 2 KiB)
-        i(RET_K, 0, 0, 0),             // 17 verwerfen
+        i(JEQ_K, 0, 3, 17),            // 13 UDP? else → 17
+        i(LD_H_ABS, 0, 0, 40),         // 14 UDP source port
+        i(JEQ_K, 0, 1, 53),            // 15 53 → 16, else → 17
+        i(RET_K, 0, 0, 2048),          // 16 accept (max. 2 KiB)
+        i(RET_K, 0, 0, 0),             // 17 drop
     ]
 }
 
-/// Mitlesen bis `stop`. Fehlt die Berechtigung (ältere systemd-Unit ohne AF_PACKET/CAP_NET_RAW), wird das einmal
-/// gemeldet und die Funktion endet – Beaconing läuft dann ohne Namen weiter.
+/// Sniff until `stop`. If the permission is missing (older systemd unit without AF_PACKET/CAP_NET_RAW), this is
+/// reported once and the function returns – beaconing then continues without names.
 #[cfg(target_os = "linux")]
 pub fn run(stop: Arc<AtomicBool>, log: impl Fn(String)) {
-    // SAFETY: einfache Systemaufrufe mit gültigen, lokal gehaltenen Puffern; der Socket wird am Ende geschlossen.
+    // SAFETY: simple system calls with valid, locally held buffers; the socket is closed at the end.
     unsafe {
         let fd = libc::socket(libc::AF_PACKET, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, (libc::ETH_P_ALL as u16).to_be() as i32);
         if fd < 0 {
-            log(format!("DNS-Namen für Beaconing nicht verfügbar ({}) – systemd-Unit ohne AF_PACKET/CAP_NET_RAW; install.sh erneut ausführen", std::io::Error::last_os_error()));
+            log(format!("DNS names for beaconing not available ({}) – systemd unit without AF_PACKET/CAP_NET_RAW; run install.sh again", std::io::Error::last_os_error()));
             return;
         }
         let mut prog = filter();
         let fprog = libc::sock_fprog { len: prog.len() as u16, filter: prog.as_mut_ptr() };
         if libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_ATTACH_FILTER, &fprog as *const _ as *const libc::c_void, std::mem::size_of::<libc::sock_fprog>() as u32) != 0 {
-            log(format!("DNS-Namen: Filter nicht gesetzt ({}) – aus", std::io::Error::last_os_error()));
+            log(format!("DNS names: filter not set ({}) – off", std::io::Error::last_os_error()));
             libc::close(fd);
             return;
         }
         let tv = libc::timeval { tv_sec: 1, tv_usec: 0 };
         libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVTIMEO, &tv as *const _ as *const libc::c_void, std::mem::size_of::<libc::timeval>() as u32);
-        log("DNS-Namen für Beaconing: aktiv (nur DNS-Antworten, nur lesen)".into());
+        log("DNS names for beaconing: active (DNS responses only, read-only)".into());
         let mut buf = [0u8; 2048];
         while !stop.load(Ordering::Relaxed) {
             let n = libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0);
@@ -207,7 +207,7 @@ pub fn run(_stop: Arc<AtomicBool>, _log: impl Fn(String)) {}
 mod tests {
     use super::*;
 
-    /// Antwort auf „ip-lookup.example A“ mit CNAME-freier Kette, drei A-Einträgen (Namen komprimiert)
+    /// Response to "ip-lookup.example A" with a CNAME-free chain, three A records (names compressed)
     fn answer() -> Vec<u8> {
         let mut m = vec![0x12, 0x34, 0x81, 0x80, 0, 1, 0, 3, 0, 0, 0, 0];
         for l in ["ip-lookup", "example"] {
@@ -237,15 +237,15 @@ mod tests {
         p.extend_from_slice(&[0, 53, 0xc3, 0x50, 0, 0, 0, 0]);
         p.extend_from_slice(&dns);
         assert_eq!(parse_packet(&p).len(), 3);
-        // Quellport nicht 53 → nichts
+        // source port not 53 → nothing
         let mut q = p.clone();
         q[21] = 54;
         assert!(parse_packet(&q).is_empty());
-        // Anfrage (QR=0) → nichts
+        // query (QR=0) → nothing
         let mut a = dns.clone();
         a[2] = 0x01;
         assert!(parse_dns(&a).is_empty());
-        // Fehlerantwort (NXDOMAIN) → nichts
+        // error response (NXDOMAIN) → nothing
         let mut e = dns.clone();
         e[3] = 0x83;
         assert!(parse_dns(&e).is_empty());
@@ -257,8 +257,8 @@ mod tests {
         assert!(parse_dns(&[0; 12]).is_empty());
         let mut m = vec![0, 0, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0, 0xc0, 12];
         m.extend_from_slice(&[0; 20]);
-        assert!(parse_dns(&m).is_empty(), "Zeiger auf sich selbst");
-        // ungültige Zeichen im Namen
+        assert!(parse_dns(&m).is_empty(), "pointer to itself");
+        // invalid characters in the name
         let mut b = vec![0, 0, 0x81, 0x80, 0, 1, 0, 1, 0, 0, 0, 0, 3, b'a', b' ', b'b', 0, 0, 1, 0, 1];
         b.extend_from_slice(&[0xc0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4, 1, 2, 3, 4]);
         assert!(parse_dns(&b).is_empty());
@@ -272,7 +272,7 @@ mod tests {
         for i in 0..(MAX_NAMES as u32 + 10) {
             remember(IpAddr::V4(Ipv4Addr::from(0x0a00_0000 + i)), "x.example");
         }
-        assert!(name_of(&ip).is_none(), "älteste fällt weg");
+        assert!(name_of(&ip).is_none(), "oldest is evicted");
         assert!(NAMES.lock().unwrap().as_ref().unwrap().map.len() <= MAX_NAMES);
     }
 }

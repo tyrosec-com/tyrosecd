@@ -1,6 +1,6 @@
-//! Policy: Pfad → Inhaltsmodus. Zusätzlich eine **fest eingebaute, lokale
-//! Obergrenze** (Hauptplan 27.1, A1): Geheimnisse werden nie als Inhalt
-//! übertragen, egal was eine (ggf. kompromittierte) Zentrale schickt.
+//! Policy: path → content mode. Additionally a **built-in, local
+//! upper limit** (main plan 27.1, A1): secrets are never transmitted
+//! as content, no matter what a (possibly compromised) central server sends.
 
 use globset::{Glob, GlobBuilder, GlobSet, GlobSetBuilder};
 use serde::Deserialize;
@@ -38,7 +38,7 @@ pub struct PolicyFile {
     #[serde(default)]
     pub rules: Vec<Rule>,
     pub diff_limit_bytes: Option<u64>,
-    /// Texte im Modus „full“ trotzdem maskieren (Standard: ja, Sicherheitsprüfung H6)
+    /// Redact texts in mode "full" as well (default: yes, security review H6)
     pub redact_full: Option<bool>,
 }
 
@@ -49,7 +49,7 @@ pub struct Policy {
     cap_set: GlobSet,
     pub default_mode: ContentMode,
     pub diff_limit_bytes: u64,
-    /// Geheimnisse auch in „full“-Dateien maskieren, bevor Inhalt/Diff den Server verlässt
+    /// Redact secrets in "full" files too, before content/diff leaves the server
     pub redact_full: bool,
 }
 
@@ -57,12 +57,12 @@ fn glob(p: &str) -> Glob {
     GlobBuilder::new(p).literal_separator(true).build().expect("Glob")
 }
 
-/// Standardprofile „Linux Basis“ + „Webserver“ (Hauptplan Abschnitt 6),
-/// Spike-Fassung. Spätere Regeln überschreiben frühere.
+/// Default profiles "Linux base" + "web server" (main plan section 6),
+/// spike version. Later rules override earlier ones.
 pub fn default_rules() -> Vec<(&'static str, ContentMode)> {
     use ContentMode::*;
     vec![
-        // Binaries, Bibliotheken, Kernel
+        // Binaries, libraries, kernel
         ("/usr/**", Hash),
         ("/bin/**", Hash),
         ("/sbin/**", Hash),
@@ -73,7 +73,7 @@ pub fn default_rules() -> Vec<(&'static str, ContentMode)> {
         ("/usr/lib/systemd/**", Full),
         ("/lib/systemd/system/**", Full),
         ("/usr/local/etc/**", Full),
-        // Konfiguration, Persistenz, SSH
+        // Configuration, persistence, SSH
         ("/etc/**", Full),
         ("/var/spool/cron/**", Full),
         ("/root/.ssh/**", Full),
@@ -89,20 +89,20 @@ pub fn default_rules() -> Vec<(&'static str, ContentMode)> {
         ("/srv/**", Full),
         ("/home/*/public_html/**", Full),
         ("/var/www/vhosts/**", Full),
-        // App-Konfigurationen mit Geheimnissen
+        // App configurations containing secrets
         ("**/.env", Redacted),
         ("**/.env.*", Redacted),
         ("**/wp-config.php", Redacted),
         ("**/app/etc/env.php", Redacted),
         ("**/.my.cnf", Redacted),
         ("/etc/mysql/**", Redacted),
-        // /dev nur Gerätedateien (/dev/null, /dev/pts …) – reines Rauschen; /dev/shm unten wieder an
+        // /dev only device files (/dev/null, /dev/pts …) – pure noise; /dev/shm re-enabled below
         ("/dev/**", Ignore),
-        // Malware-Ablageorte
+        // Malware drop locations
         ("/tmp/**", Hash),
         ("/var/tmp/**", Hash),
         ("/dev/shm/**", Hash),
-        // Rauschen
+        // Noise
         ("/proc/**", Ignore),
         ("/sys/**", Ignore),
         ("/run/**", Ignore),
@@ -110,7 +110,7 @@ pub fn default_rules() -> Vec<(&'static str, ContentMode)> {
         ("/var/cache/**", Ignore),
         ("/var/lib/apt/lists/**", Ignore),
         ("/var/lib/mysql/**", Ignore),
-        // Datenverzeichnisse von Diensten (ändern sich ständig; Integrität ist dort nicht FIM-Sache)
+        // Service data directories (change constantly; integrity there is not a FIM concern)
         ("/var/lib/mariadb/**", Ignore),
         ("/var/lib/postgresql/**", Ignore),
         ("/var/lib/pgsql/**", Ignore),
@@ -120,15 +120,16 @@ pub fn default_rules() -> Vec<(&'static str, ContentMode)> {
         ("/var/lib/opensearch/**", Ignore),
         ("/var/lib/clickhouse/**", Ignore),
         ("/var/lib/influxdb/**", Ignore),
-        // Monitoring-Daten (Praxisfall: 33 000 Prometheus-WAL-Ereignisse am Tag auf einem Server)
+        // Monitoring data (real-world case: 33,000 Prometheus WAL events per day on one server)
         ("/var/lib/prometheus/**", Ignore),
         ("/var/lib/grafana/**", Ignore),
         ("/var/lib/loki/**", Ignore),
-        // systemd-timesyncd schreibt jede Minute einen Zeitstempel (je Server ~1 300 Ereignisse am Tag)
+        // systemd-timesyncd writes a timestamp every minute (~1,300 events per day per server)
         ("/var/lib/systemd/timesync/**", Ignore),
-        // runc legt je „docker exec“ eine Prozessdatei an und löscht sie wieder (Praxisfall auf einem Mailserver: 23 000 am Tag)
+        // runc creates and deletes a process file for each "docker exec" (real-world case on a mail server:
+        // 23,000 per day)
         ("/tmp/runc-process*", Ignore),
-        // Protokolle von Anwendungen (Laravel storage/logs, Symfony/Shopware var/log) – kein Code
+        // Application logs (Laravel storage/logs, Symfony/Shopware var/log) – no code
         ("**/storage/logs/**", Ignore),
         ("**/var/log/**", Ignore),
         ("/var/lib/rabbitmq/**", Ignore),
@@ -148,14 +149,14 @@ pub fn default_rules() -> Vec<(&'static str, ContentMode)> {
         ("/var/lib/containerd/**", Ignore),
         ("/var/lib/php/sessions/**", Ignore),
         ("/var/lib/tyrosecd/**", Ignore),
-        ("/var/lib/tyrosd/**", Ignore), // Altinstallationen vor der Umbenennung
+        ("/var/lib/tyrosd/**", Ignore), // legacy installations from before the rename
         ("/var/lib/tyrosd-spike/**", Ignore),
         ("**/wp-content/cache/**", Ignore),
         ("**/var/cache/**", Ignore),
         ("**/node_modules/.cache/**", Ignore),
-        // Praxisfall (Entwickler- und Testserver): Build-Cache von Next.js, V8-Compile-Cache von Node,
-        // Browser-Caches von Puppeteer/Playwright-Profilen in /tmp und Testartefakte von Playwright – kein ausgeführter
-        // Servercode, je Lauf Tausende Dateien. Ausführen aus /tmp erkennt weiterhin die Prozess-Überwachung.
+        // Real-world case (developer and test servers): Next.js build cache, Node V8 compile cache,
+        // browser caches of Puppeteer/Playwright profiles in /tmp and Playwright test artifacts – no executed
+        // server code, thousands of files per run. Execution from /tmp is still detected by process monitoring.
         ("**/.next/cache/**", Ignore),
         ("/tmp/node-compile-cache/**", Ignore),
         ("/tmp/*/Default/Cache/**", Ignore),
@@ -163,15 +164,15 @@ pub fn default_rules() -> Vec<(&'static str, ContentMode)> {
         ("/tmp/*/Default/GPUCache/**", Ignore),
         ("/tmp/*/Default/Service Worker/CacheStorage/**", Ignore),
         ("**/.playwright-artifacts-*/**", Ignore),
-        // Nextcloud-Vorschaubilder (appdata_<instanz>/preview): reiner Cache, oft Zehntausende Ordner
-        // (Praxisfall bei einer Installation: 53 000 von 137 000 Ordnern) – kein Code, wird neu erzeugt
+        // Nextcloud preview images (appdata_<instance>/preview): pure cache, often tens of thousands of folders
+        // (real-world case on one installation: 53,000 of 137,000 folders) – no code, regenerated
         ("**/appdata_*/preview/**", Ignore),
-        // Bytecode-Caches (schreibt der Interpreter selbst, z. B. Python beim Start von ufw)
+        // Bytecode caches (written by the interpreter itself, e.g. Python when ufw starts)
         ("**/__pycache__/**", Ignore),
         ("**/*.pyc", Ignore),
         ("/tmp/systemd-private-*/**", Ignore),
-        // Hilfsdateien von Datenbanken, die bei jeder Schreibtransaktion entstehen: PostgreSQL-
-        // Shared-Memory-Segmente, SQLite-Journal und -WAL – kein Code, nicht ausführbar, Inhalt ist die Datenbank selbst
+        // Database helper files created on every write transaction: PostgreSQL
+        // shared memory segments, SQLite journal and WAL – no code, not executable, content is the database itself
         ("/dev/shm/PostgreSQL.*", Ignore),
         ("**/*.db-wal", Ignore),
         ("**/*.db-shm", Ignore),
@@ -186,7 +187,7 @@ pub fn default_rules() -> Vec<(&'static str, ContentMode)> {
     ]
 }
 
-/// Feste Obergrenzen. Nicht per Policy lockerbar.
+/// Fixed upper limits. Cannot be relaxed by policy.
 pub fn hard_caps() -> Vec<(&'static str, ContentMode)> {
     use ContentMode::*;
     vec![
@@ -217,7 +218,7 @@ pub fn hard_caps() -> Vec<(&'static str, ContentMode)> {
         ("**/.pgpass", Hash),
         ("**/.netrc", Hash),
         ("**/.git-credentials", Hash),
-        // Sicherheitsprüfung H6: Dateien, die fast nur aus Geheimnissen bestehen – nie Inhalt, nur Hash/Metadaten
+        // Security review H6: files that consist almost entirely of secrets – never content, only hash/metadata
         ("/etc/wireguard/**", Hash),
         ("**/wg*.conf", Hash),
         ("/etc/kubernetes/**", Hash),
@@ -229,7 +230,7 @@ pub fn hard_caps() -> Vec<(&'static str, ContentMode)> {
         ("**/*.sql", Hash),
         ("**/.htpasswd", Hash),
         ("**/*.htpasswd", Hash),
-        // Web-Anwendungen mit Datenbank-Passwörtern/Schlüsseln in PHP-Konfigurationen
+        // Web applications with database passwords/keys in PHP configurations
         ("**/config/config.php", Hash),           // Nextcloud/ownCloud
         ("**/configuration.php", Hash),           // Joomla
         ("**/settings.php", Hash),                // Drupal (sites/*/settings.php), TYPO3 ≥ 12 (config/system/settings.php)
@@ -266,9 +267,9 @@ impl Policy {
         }
     }
 
-    /// Ist ein unveränderter Schreibzugriff (WRITE_NOCHANGE) hier von Bedeutung? Nur für Zugänge, Rechte, Anmeldung und
-    /// Autostart – dieselbe Liste, für die die Zentrale alarmiert. Sonst kein Ereignis (Praxisfall: 30 % aller
-    /// Datei-Ereignisse waren unveränderte Schreibzugriffe auf Datenbanken, Logs, Sperrdateien).
+    /// Does an unchanged write (WRITE_NOCHANGE) matter here? Only for access, permissions, login and
+    /// autostart – the same list the central server alerts on. Otherwise no event (real-world case: 30 % of all
+    /// file events were unchanged writes to databases, logs, lock files).
     pub fn nochange_relevant(path: &str) -> bool {
         let p = crate::container::effective(path);
         matches!(p, "/etc/passwd" | "/etc/shadow" | "/etc/group" | "/etc/gshadow" | "/etc/sudoers" | "/etc/ld.so.preload" | "/etc/crontab"
@@ -286,7 +287,7 @@ impl Policy {
         Policy::new(&r)
     }
 
-    /// Standardregeln + Regeln aus einer JSON-Datei (werden angehängt).
+    /// Default rules + rules from a JSON file (appended).
     pub fn from_file(path: &str) -> anyhow::Result<Policy> {
         let f: PolicyFile = serde_json::from_str(&std::fs::read_to_string(path)?)?;
         let mut r: Vec<(String, ContentMode)> =
@@ -302,10 +303,10 @@ impl Policy {
         Ok(p)
     }
 
-    /// Modus für einen Pfad, nach Anwendung der festen Obergrenze.
+    /// Mode for a path, after applying the fixed upper limit.
     pub fn mode_for(&self, path: &str) -> ContentMode {
-        // Container: Docker-/Podman-Speicher bleibt ausgenommen, außer der Schreibschicht (Laufzeit-Änderungen);
-        // in Container-Wurzeln gelten die Regeln für den Pfad im Container
+        // Containers: Docker/Podman storage stays excluded, except the writable layer (runtime changes);
+        // inside container roots the rules for the path inside the container apply
         if let Some(c) = crate::container::container_path(path) {
             return self.mode_for_plain(c.rel);
         }
@@ -348,7 +349,7 @@ mod tests {
             assert_eq!(p.mode_for(x), Ignore, "{x}");
         }
         assert_ne!(p.mode_for("/tmp/x.sh"), Ignore);
-        // Build-Ausgabe selbst (ausführbarer Servercode) und Profil-Wurzel in /tmp bleiben überwacht
+        // Build output itself (executable server code) and profile root in /tmp stay monitored
         assert_ne!(p.mode_for("/users/www/appfrontend/.next/server/app/page.js"), Ignore);
         assert_ne!(p.mode_for("/tmp/puppeteer_dev_chrome_profile-W6xvAi/x.sh"), Ignore);
         assert!(Policy::nochange_relevant("/etc/sudoers.d/90-admin"));
@@ -385,7 +386,7 @@ mod tests {
         let p = Policy::default_policy();
         assert_eq!(p.mode_for("/users/www/site/nextcloud/data/appdata_oce1u9kp4jmo/preview/8/6/2/3/x.jpg"), ContentMode::Ignore);
         assert_eq!(p.mode_for("/var/www/nc/data/appdata_abc/preview/1/.x"), ContentMode::Ignore);
-        // Code der Nextcloud und andere appdata-Ordner bleiben überwacht
+        // Nextcloud code and other appdata folders stay monitored
         assert_ne!(p.mode_for("/var/www/nc/apps/files/lib/App.php"), ContentMode::Ignore);
         assert_ne!(p.mode_for("/var/www/nc/data/appdata_abc/theming/x.php"), ContentMode::Ignore);
     }
@@ -411,7 +412,7 @@ mod tests {
 
     #[test]
     fn policy_cannot_lift_caps() {
-        // Simuliert eine kompromittierte Zentrale, die Geheimnisse anfordert.
+        // Simulates a compromised central server requesting secrets.
         let mut r: Vec<(String, ContentMode)> =
             default_rules().into_iter().map(|(g, m)| (g.to_string(), m)).collect();
         r.push(("/etc/shadow".into(), Full));
@@ -426,7 +427,7 @@ mod tests {
     #[test]
     fn secret_files_only_hash() {
         let p = Policy::default_policy();
-        assert!(p.redact_full, "Standard: auch „full“ wird maskiert");
+        assert!(p.redact_full, "default: “full” is masked too");
         for f in [
             "/etc/wireguard/wg0.conf",
             "/etc/kubernetes/admin.conf",

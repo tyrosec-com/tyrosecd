@@ -1,16 +1,16 @@
-//! Persistenter Zustand des Agents (ersetzt Hash-Tabellen im RAM):
-//! - `state`: Pfad → Hash (binär), Hash der gespeicherten Fassung, Metadaten
-//! - `blobs`: Hash → zstd-komprimierter Inhalt (Diff-Basis), ersetzt die
-//!   vielen Einzeldateien des alten Snapshot-Caches
-//! - `meta`: Zähler und Flags
-//! - `history`: Pfad → zuletzt gesehene Roh-Hashes (SHA-256) – Grundlage für „Wiederherstellen nur auf
-//!   eine Fassung, die der Agent selbst gesehen hat“ (Sicherheitsprüfung K1)
-//! - `actions`: Aktions-ID → Zeitpunkt, Stand, Meldung – jede Aktion der Zentrale läuft höchstens einmal
-//!   (auch über Neustarts), IDs werden `ACTIONS_KEEP` lang behalten
+//! Persistent agent state (replaces in-RAM hash tables):
+//! - `state`: path → hash (binary), hash of the stored version, metadata
+//! - `blobs`: hash → zstd-compressed content (diff base), replaces the
+//!   many individual files of the old snapshot cache
+//! - `meta`: counters and flags
+//! - `history`: path → most recently seen raw hashes (SHA-256) – basis for "restore only to
+//!   a version the agent has seen itself" (security review K1)
+//! - `actions`: action ID → timestamp, status, message – every action from the central server runs at most once
+//!   (also across restarts), IDs are kept for `ACTIONS_KEEP`
 //!
-//! Eingebettet (redb, reines Rust, eine Datei, kein Dienst). Im RAM liegen nur
-//! der redb-Seiten-Cache (begrenzt) und ein Puffer noch nicht geschriebener
-//! Änderungen, der gebündelt geschrieben wird.
+//! Embedded (redb, pure Rust, a single file, no service). Only the redb page cache (bounded)
+//! and a buffer of not yet written changes live in RAM; the buffer is
+//! written in batches.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -29,15 +29,15 @@ const HISTORY: TableDefinition<&str, &[u8]> = TableDefinition::new("history");
 
 const ACTIONS: TableDefinition<u64, &[u8]> = TableDefinition::new("actions");
 
-/// So viele zuletzt gesehene Fassungen je Pfad merkt sich der Agent.
+/// Number of most recently seen versions the agent remembers per path.
 pub const HISTORY_MAX: usize = 16;
-/// so lange bleiben ausgeführte Aktions-IDs gespeichert
+/// how long executed action IDs stay stored
 pub const ACTIONS_KEEP: Duration = Duration::from_secs(30 * 24 * 3600);
 
-/// Stand einer Aktion der Zentrale
+/// Status of an action from the central server
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionRun {
-    /// begonnen, Ergebnis (noch) nicht gespeichert – läuft gerade oder wurde durch einen Neustart unterbrochen
+    /// started, result not (yet) stored – currently running or interrupted by a restart
     Running { ts_ns: i64 },
     Done { ts_ns: i64, ok: bool, message: String },
 }
@@ -50,7 +50,7 @@ impl ActionRun {
         };
         let mut v = ts.to_le_bytes().to_vec();
         v.push(st);
-        // Meldung gekürzt (an Zeichengrenze)
+        // truncate the message (at a character boundary)
         let mut end = msg.len().min(500);
         while !msg.is_char_boundary(end) {
             end -= 1;
@@ -68,12 +68,12 @@ impl ActionRun {
     }
 }
 
-/// Zustand einer Datei.
+/// State of a file.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Entry {
-    /// Hash des Rohinhalts (bei Symlinks: Hash des Ziels)
+    /// hash of the raw content (for symlinks: hash of the target)
     pub hash: [u8; 32],
-    /// Hash der gespeicherten (ggf. maskierten) Fassung = Diff-Basis
+    /// hash of the stored (possibly masked) version = diff base
     pub stored: Option<[u8; 32]>,
     pub meta: FileMeta,
 }
@@ -132,7 +132,7 @@ impl Entry {
     }
 }
 
-/// Hex-Hash (aus `hash::hash_bytes`) → 32 Byte.
+/// Hex hash (from `hash::hash_bytes`) → 32 bytes.
 pub fn hash_from_hex(h: &str) -> [u8; 32] {
     let mut out = [0u8; 32];
     if let Ok(v) = hex::decode(h) {
@@ -144,10 +144,10 @@ pub fn hash_from_hex(h: &str) -> [u8; 32] {
 
 #[derive(Default)]
 struct Pending {
-    /// None = gelöscht
+    /// None = deleted
     state: HashMap<String, Option<Entry>>,
     blobs: HashMap<[u8; 32], Vec<u8>>,
-    /// neu gesehene Roh-Hashes je Pfad (älteste zuerst)
+    /// newly seen raw hashes per path (oldest first)
     hist: HashMap<String, Vec<[u8; 32]>>,
     bytes: usize,
 }
@@ -161,7 +161,7 @@ pub struct State {
     path: String,
 }
 
-/// Puffer wird geschrieben, wenn er größer als das wird (Einträge bzw. Bytes).
+/// The buffer is written once it grows beyond these limits (entries or bytes).
 const FLUSH_ENTRIES: usize = 20_000;
 const FLUSH_BYTES: usize = 16 * 1024 * 1024;
 
@@ -194,7 +194,7 @@ impl State {
             last_durable: Mutex::new(Instant::now()),
             path: path.to_string(),
         });
-        // Hintergrund: Puffer jede Sekunde schreiben, alle 30 s dauerhaft (fsync)
+        // background: write the buffer every second, durably (fsync) every 30 s
         let w = Arc::downgrade(&s);
         std::thread::Builder::new()
             .name("state-flush".into())
@@ -241,7 +241,7 @@ impl State {
         }
     }
 
-    /// Roh-Hash (SHA-256) einer Fassung merken, die der Agent selbst gelesen hat.
+    /// Remember the raw hash (SHA-256) of a version the agent has read itself.
     pub fn remember(&self, path: &str, h: &[u8; 32]) {
         let full = {
             let mut p = self.pending.lock().unwrap();
@@ -262,7 +262,7 @@ impl State {
         }
     }
 
-    /// Hat der Agent für genau diesen Pfad schon einmal eine Fassung mit diesem Roh-Hash gesehen?
+    /// Has the agent ever seen a version with this raw hash for exactly this path?
     pub fn seen_hash(&self, path: &str, h: &[u8; 32]) -> bool {
         if self.pending.lock().unwrap().hist.get(path).is_some_and(|v| v.contains(h)) {
             return true;
@@ -286,7 +286,7 @@ impl State {
             .is_some()
     }
 
-    /// Inhalt speichern (zstd). `false`, wenn das Budget erschöpft ist.
+    /// Store content (zstd). `false` if the budget is exhausted.
     pub fn blob_put(&self, h: &[u8; 32], data: &[u8]) -> bool {
         if self.blob_exists(h) {
             return true;
@@ -325,7 +325,7 @@ impl State {
         zstd::decode_all(&comp[..]).ok()
     }
 
-    /// Puffer schreiben. `durable` = mit fsync.
+    /// Write the buffer. `durable` = with fsync.
     pub fn flush(&self, durable: bool) -> Result<()> {
         let mut p = self.pending.lock().unwrap();
         if p.state.is_empty() && p.blobs.is_empty() && p.hist.is_empty() && !durable {
@@ -367,7 +367,7 @@ impl State {
             m.insert("blob_bytes", self.blob_bytes.load(Ordering::Relaxed))?;
         }
         txn.commit()?;
-        // Puffer freigeben (inkl. Kapazität, damit RSS wieder sinkt)
+        // release the buffer (including capacity, so RSS goes down again)
         *p = Pending::default();
         if durable {
             *self.last_durable.lock().unwrap() = Instant::now();
@@ -375,9 +375,9 @@ impl State {
         Ok(())
     }
 
-    /// Aktion beginnen: atomar „noch nie gesehen → als laufend vermerken“ (dauerhaft, vor der Ausführung).
-    /// `None` = darf jetzt laufen; sonst der bisherige Stand (nicht erneut ausführen). Räumt dabei IDs auf, die älter
-    /// als `ACTIONS_KEEP` sind.
+    /// Begin an action: atomically "never seen → mark as running" (durably, before execution).
+    /// `None` = may run now; otherwise the previous status (do not run again). Also cleans up IDs older
+    /// than `ACTIONS_KEEP`.
     pub fn action_begin(&self, id: u64, now_ns: i64) -> Result<Option<ActionRun>> {
         let mut txn = self.db.begin_write()?;
         txn.set_durability(Durability::Immediate);
@@ -405,7 +405,7 @@ impl State {
         Ok(prev)
     }
 
-    /// Ergebnis einer Aktion speichern (für erneute Meldung bei Wiederholung).
+    /// Store the result of an action (to report it again on a repeat).
     pub fn action_finish(&self, id: u64, now_ns: i64, ok: bool, message: &str) -> Result<()> {
         let mut txn = self.db.begin_write()?;
         txn.set_durability(Durability::Immediate);
@@ -436,7 +436,7 @@ impl State {
             .unwrap_or(0)
     }
 
-    /// Anzahl bekannter Pfade (ohne ungeschriebenen Puffer).
+    /// Number of known paths (excluding the unwritten buffer).
     pub fn count(&self) -> u64 {
         self.db
             .begin_read()
@@ -446,8 +446,8 @@ impl State {
             .unwrap_or(0)
     }
 
-    /// Bekannte Pfade unterhalb von `root`, deren Datei nicht mehr existiert.
-    /// Läuft über die sortierte Tabelle, ohne alle Pfade in den RAM zu laden.
+    /// Known paths below `root` whose file no longer exists.
+    /// Walks the sorted table without loading all paths into RAM.
     pub fn missing_under(&self, root: &str) -> Result<Vec<String>> {
         self.flush(false)?;
         let prefix = if root == "/" { "/".to_string() } else { format!("{}/", root.trim_end_matches('/')) };
@@ -493,7 +493,7 @@ mod tests {
             let e = Entry { hash: [7; 32], stored: Some([9; 32]), meta: meta() };
             s.put("/etc/passwd", e.clone());
             assert_eq!(s.get("/etc/passwd"), Some(e.clone()));
-            assert!(s.blob_put(&[9; 32], b"inhalt"));
+            assert!(s.blob_put(&[9; 32], b"content"));
             s.flush(true).unwrap();
             assert_eq!(s.get("/etc/passwd"), Some(e));
             s.remove("/etc/passwd");
@@ -506,11 +506,11 @@ mod tests {
         assert!(s.is_complete());
         assert_eq!(s.get("/etc/passwd"), None);
         assert_eq!(s.get("/etc/hosts").unwrap().hash, [1; 32]);
-        assert_eq!(s.blob_get(&[9; 32]).unwrap(), b"inhalt");
+        assert_eq!(s.blob_get(&[9; 32]).unwrap(), b"content");
         assert_eq!(s.count(), 1);
-        // /etc/hosts existiert auf dem Testsystem evtl.; ein erfundener Pfad nicht
-        s.put("/nicht/vorhanden/x", Entry { hash: [2; 32], stored: None, meta: meta() });
-        assert_eq!(s.missing_under("/nicht").unwrap(), vec!["/nicht/vorhanden/x".to_string()]);
+        // /etc/hosts may exist on the test system; a made-up path does not
+        s.put("/does-not/exist/x", Entry { hash: [2; 32], stored: None, meta: meta() });
+        assert_eq!(s.missing_under("/does-not").unwrap(), vec!["/does-not/exist/x".to_string()]);
     }
 
     #[test]
@@ -530,10 +530,10 @@ mod tests {
         for h in [1u8, 2, 3] {
             assert!(s.seen_hash("/var/www/a.php", &[h; 32]), "{h}");
         }
-        // nur für genau diesen Pfad
+        // only for exactly this path
         assert!(!s.seen_hash("/var/www/b.php", &[1; 32]));
         assert!(!s.seen_hash("/var/www/a.php", &[9; 32]));
-        // begrenzt: älteste Fassungen fallen heraus
+        // bounded: oldest versions drop out
         for i in 10..(10 + HISTORY_MAX as u8) {
             s.remember("/var/www/a.php", &[i; 32]);
         }
@@ -551,22 +551,22 @@ mod tests {
         {
             let s = State::open(&p, 4, 1 << 20).unwrap();
             assert_eq!(s.action_begin(7, t0).unwrap(), None);
-            // läuft noch → nicht erneut
+            // still running → not again
             assert_eq!(s.action_begin(7, t0 + 1).unwrap(), Some(ActionRun::Running { ts_ns: t0 }));
-            s.action_finish(7, t0 + 2, true, "1.2.3.4 gesperrt").unwrap();
-            assert_eq!(s.action_begin(8, t0 + 3).unwrap(), None); // unterbrochen (kein finish)
+            s.action_finish(7, t0 + 2, true, "1.2.3.4 blocked").unwrap();
+            assert_eq!(s.action_begin(8, t0 + 3).unwrap(), None); // interrupted (no finish)
         }
-        // über Neustart hinweg
+        // across a restart
         let s = State::open(&p, 4, 1 << 20).unwrap();
-        assert_eq!(s.action_begin(7, t0 + 10).unwrap(), Some(ActionRun::Done { ts_ns: t0 + 2, ok: true, message: "1.2.3.4 gesperrt".into() }));
+        assert_eq!(s.action_begin(7, t0 + 10).unwrap(), Some(ActionRun::Done { ts_ns: t0 + 2, ok: true, message: "1.2.3.4 blocked".into() }));
         assert!(matches!(s.action_begin(8, t0 + 10).unwrap(), Some(ActionRun::Running { .. })));
-        // nach 30 Tagen vergessen
+        // forgotten after 30 days
         assert_eq!(s.action_begin(9, t0 + 31 * day).unwrap(), None);
         assert_eq!(s.action_begin(7, t0 + 31 * day).unwrap(), None);
-        // lange Meldung mit Umlauten: gekürzt, gültiges UTF-8
-        s.action_finish(10, t0, false, &"ä".repeat(400)).unwrap();
+        // long message with umlauts: truncated, valid UTF-8
+        s.action_finish(10, t0, false, &"ä".repeat(400)).unwrap(); // guard:de-ok UTF-8 test data
         let Some(ActionRun::Done { message, ok, .. }) = s.action_begin(10, t0).unwrap() else { panic!() };
-        assert!(!ok && message.len() <= 500 && message.chars().all(|c| c == 'ä'));
+        assert!(!ok && message.len() <= 500 && message.chars().all(|c| c == 'ä')); // guard:de-ok UTF-8 test data
     }
 
     #[test]
@@ -575,6 +575,6 @@ mod tests {
         let p = dir.path().join("b.redb").to_string_lossy().into_owned();
         let s = State::open(&p, 4, 64).unwrap();
         let big: Vec<u8> = (0..10_000u32).flat_map(|i| i.to_le_bytes()).collect();
-        assert!(!s.blob_put(&[3; 32], &big), "Budget muss greifen");
+        assert!(!s.blob_put(&[3; 32], &big), "budget must apply");
     }
 }

@@ -1,7 +1,7 @@
-//! Deploy-Fenster (Hauptplan 7.2): CI/Deploy-Skripte melden per
-//! `tyrosd deploy start|end` einen Deploy. Der laufende Agent liest den
-//! Marker (Datei, nur root-schreibbar) und versieht Ereignisse im Fenster mit
-//! `deploy:<label>`. Die Zentrale gruppiert sie, statt einzeln zu alarmieren.
+//! Deploy window (main plan 7.2): CI/deploy scripts announce a deploy via
+//! `tyrosd deploy start|end`. The running agent reads the
+//! marker (file, writable by root only) and tags events within the window with
+//! `deploy:<label>`. The central server groups them instead of alerting on each one.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -11,9 +11,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DeployMarker {
     pub label: String,
-    /// Unix-Sekunden; danach gilt das Fenster als beendet (Schutz vor vergessenem `end`)
+    /// Unix seconds; after that the window counts as ended (protects against a forgotten `end`)
     pub until: u64,
-    /// Optional: nur Pfade unter diesen Präfixen (z. B. Webroot)
+    /// Optional: only paths under these prefixes (e.g. webroot)
     #[serde(default)]
     pub paths: Vec<String>,
 }
@@ -32,7 +32,7 @@ impl DeployWindow {
         DeployWindow { path: path.into(), cache: Mutex::new((Instant::now() - Duration::from_secs(10), None)) }
     }
 
-    /// Label, falls `p` in einem aktiven Deploy-Fenster liegt (Marker höchstens 1×/s gelesen).
+    /// Label if `p` lies within an active deploy window (marker read at most once per second).
     pub fn label_for(&self, p: &str) -> Option<String> {
         let mut c = self.cache.lock().unwrap();
         if c.0.elapsed() > Duration::from_secs(1) {

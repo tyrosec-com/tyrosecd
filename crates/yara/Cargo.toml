@@ -4,14 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "YARA-Regelpaket laden und Dateien prüfen (boreal, reines Rust)"
+description = "Load the YARA rule package and scan files (boreal, pure Rust)"
 
 [dependencies]
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 zstd.workspace = true
-# ohne „process“ (Prozessspeicher) und „memmap“; „object“ für die Module pe/elf, die Regeldateien importieren
+# without "process" (process memory) and "memmap"; "object" for the pe/elf modules that rule files import
 boreal = { version = "1.4", default-features = false, features = ["hash", "object"] }
 
 [dev-dependencies]

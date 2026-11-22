@@ -1,8 +1,9 @@
-//! Erneuerung des Client-Zertifikats (Sicherheitsprüfung K4): Agent-Zertifikate laufen nach wenigen Wochen ab.
-//! Täglich prüfen; ab weniger als `RENEW_BEFORE_DAYS` Tagen Restlaufzeit neues Schlüsselpaar + CSR (wie beim
-//! Enrollment) über die **bestehende** mTLS-Verbindung an `POST /v1/renew` (`{"csr": "<PEM>"}` → `{"cert": "<PEM>"}`).
-//! Das neue Zertifikat muss zum neuen Schlüssel passen und denselben CN (Host-ID) und Aussteller haben wie das alte.
-//! Austausch atomar mit Wiederaufnahme nach Absturz (`recover_pending`).
+//! Renewal of the client certificate (security review K4): agent certificates expire after a few weeks.
+//! Checked daily; with less than `RENEW_BEFORE_DAYS` days remaining, a new key pair + CSR (as during
+//! enrollment) is sent over the **existing** mTLS connection to `POST /v1/renew`
+//! (`{"csr": "<PEM>"}` → `{"cert": "<PEM>"}`).
+//! The new certificate must match the new key and have the same CN (host ID) and issuer as the old one.
+//! Atomic exchange with resumption after a crash (`recover_pending`).
 
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -13,23 +14,23 @@ use anyhow::{bail, Context, Result};
 use crate::client::Client;
 use crate::config::AgentConfig;
 
-/// Ab dieser Restlaufzeit wird erneuert
+/// Renew from this remaining validity onwards
 pub const RENEW_BEFORE_DAYS: i64 = 14;
 
-/// Angaben aus einem Zertifikat
+/// Data from a certificate
 #[derive(Debug, Clone, PartialEq)]
 pub struct CertInfo {
     pub cn: String,
     pub issuer: String,
     pub not_after: i64,
-    /// öffentlicher Schlüssel (subjectPublicKey, roh)
+    /// public key (subjectPublicKey, raw)
     pub public_key: Vec<u8>,
 }
 
 pub fn cert_info(pem: &str) -> Result<CertInfo> {
     let mut r = std::io::BufReader::new(pem.as_bytes());
-    let der = rustls_pemfile::certs(&mut r).next().context("kein Zertifikat im PEM")??;
-    let (_, c) = x509_parser::parse_x509_certificate(der.as_ref()).map_err(|e| anyhow::anyhow!("Zertifikat nicht lesbar: {e}"))?;
+    let der = rustls_pemfile::certs(&mut r).next().context("no certificate in PEM")??;
+    let (_, c) = x509_parser::parse_x509_certificate(der.as_ref()).map_err(|e| anyhow::anyhow!("certificate not readable: {e}"))?;
     let cn = c.subject().iter_common_name().next().and_then(|n| n.as_str().ok()).unwrap_or("").to_string();
     Ok(CertInfo {
         cn,
@@ -43,7 +44,7 @@ fn now_s() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-/// Resttage des aktuellen Client-Zertifikats
+/// Remaining days of the current client certificate
 pub fn days_left(cfg: &AgentConfig) -> Result<i64> {
     let pem = std::fs::read_to_string(cfg.cert_path()).with_context(|| cfg.cert_path())?;
     Ok((cert_info(&pem)?.not_after - now_s()) / 86400)
@@ -64,7 +65,7 @@ fn write_file(path: &str, data: &[u8], mode: u32) -> Result<()> {
     Ok(())
 }
 
-/// Unterbrochenen Austausch abschließen: `agent.crt.renew` ist der Festschreibe-Punkt (erst danach wird umbenannt).
+/// Complete an interrupted exchange: `agent.crt.renew` is the commit point (renaming happens only after it).
 pub fn recover_pending(cfg: &AgentConfig) {
     let (pk, pc) = (pending_key(cfg), pending_crt(cfg));
     if std::path::Path::new(&pc).exists() {
@@ -72,37 +73,37 @@ pub fn recover_pending(cfg: &AgentConfig) {
             let _ = std::fs::rename(&pk, cfg.key_path());
         }
         let _ = std::fs::rename(&pc, cfg.cert_path());
-        eprintln!("[tyrosecd] unterbrochene Zertifikats-Erneuerung abgeschlossen");
+        eprintln!("[tyrosecd] interrupted certificate renewal completed");
     } else {
         let _ = std::fs::remove_file(&pk);
     }
     let _ = std::fs::remove_file(format!("{pc}.tmp"));
 }
 
-/// Neues Zertifikat gegen alten Stand und neuen Schlüssel prüfen
+/// Check the new certificate against the old state and the new key
 pub fn check_new(old: &CertInfo, new: &CertInfo, new_public_key: &[u8]) -> Result<()> {
     if new.public_key != new_public_key {
-        bail!("neues Zertifikat passt nicht zum neuen Schlüssel");
+        bail!("new certificate does not match the new key");
     }
     if new.cn.is_empty() || new.cn != old.cn {
-        bail!("neues Zertifikat für anderen Host ({} statt {})", new.cn, old.cn);
+        bail!("new certificate for a different host ({} instead of {})", new.cn, old.cn);
     }
     if new.issuer != old.issuer {
-        bail!("neues Zertifikat von anderem Aussteller ({})", new.issuer);
+        bail!("new certificate from a different issuer ({})", new.issuer);
     }
     if new.not_after <= now_s() || new.not_after <= old.not_after {
-        bail!("neues Zertifikat läuft nicht später ab als das bisherige");
+        bail!("new certificate does not expire later than the current one");
     }
     Ok(())
 }
 
-/// Schlüssel + Zertifikat atomar ersetzen (Schlüssel 0600)
+/// Replace key + certificate atomically (key 0600)
 pub fn install(cfg: &AgentConfig, key_pem: &str, cert_pem: &str) -> Result<()> {
     let (pk, pc) = (pending_key(cfg), pending_crt(cfg));
     write_file(&pk, key_pem.as_bytes(), 0o600)?;
     let tmp = format!("{pc}.tmp");
     write_file(&tmp, cert_pem.as_bytes(), 0o644)?;
-    std::fs::rename(&tmp, &pc)?; // Festschreibe-Punkt
+    std::fs::rename(&tmp, &pc)?; // commit point
     std::fs::rename(&pk, cfg.key_path())?;
     std::fs::rename(&pc, cfg.cert_path())?;
     if let Ok(d) = std::fs::File::open(&cfg.data_dir) {
@@ -111,16 +112,16 @@ pub fn install(cfg: &AgentConfig, key_pem: &str, cert_pem: &str) -> Result<()> {
     Ok(())
 }
 
-/// Zertifikat jetzt erneuern (über die bestehende mTLS-Verbindung `client`). Liefert das neue Ablaufdatum.
+/// Renew the certificate now (over the existing mTLS connection `client`). Returns the new expiry date.
 pub fn renew(cfg: &AgentConfig, client: &Client) -> Result<i64> {
     let old = cert_info(&std::fs::read_to_string(cfg.cert_path()).with_context(|| cfg.cert_path())?)?;
-    // wie beim Enrollment: ECDSA P-256, Schlüssel verlässt den Server nie
-    let key = rcgen::KeyPair::generate().context("Schlüssel erzeugen")?;
+    // as during enrollment: ECDSA P-256, the key never leaves the server
+    let key = rcgen::KeyPair::generate().context("generate key")?;
     let mut params = rcgen::CertificateParams::new(Vec::<String>::new())?;
     params.distinguished_name.push(rcgen::DnType::CommonName, "tyrosecd-agent");
     let csr = params.serialize_request(&key)?.pem()?;
-    let resp = client.post_json("/v1/renew", &serde_json::json!({ "csr": csr })).context("Erneuerung")?;
-    let cert_pem = resp.get("cert").and_then(|c| c.as_str()).context("Antwort ohne Zertifikat")?;
+    let resp = client.post_json("/v1/renew", &serde_json::json!({ "csr": csr })).context("renewal")?;
+    let cert_pem = resp.get("cert").and_then(|c| c.as_str()).context("response without certificate")?;
     let new = cert_info(cert_pem)?;
     check_new(&old, &new, key.public_key_raw())?;
     install(cfg, &key.serialize_pem(), cert_pem)?;
@@ -128,7 +129,7 @@ pub fn renew(cfg: &AgentConfig, client: &Client) -> Result<i64> {
     Ok(new.not_after)
 }
 
-/// Täglich aufrufen: erneuert bei Bedarf. `Ok(None)` = noch nicht nötig.
+/// Call daily: renews when needed. `Ok(None)` = not needed yet.
 pub fn maybe_renew(cfg: &AgentConfig, client: &Client) -> Result<Option<i64>> {
     if days_left(cfg)? >= RENEW_BEFORE_DAYS {
         return Ok(None);
@@ -165,16 +166,16 @@ mod tests {
         assert!((old.not_after - now_s()) / 86400 < RENEW_BEFORE_DAYS);
         let good = cert_info(&issue(&ca1, &k_new, "host-1", 90)).unwrap();
         assert!(check_new(&old, &good, k_new.public_key_raw()).is_ok());
-        // falscher Schlüssel
+        // wrong key
         assert!(check_new(&old, &cert_info(&issue(&ca1, &k_other, "host-1", 90)).unwrap(), k_new.public_key_raw()).is_err());
-        // anderer Host
+        // different host
         assert!(check_new(&old, &cert_info(&issue(&ca1, &k_new, "host-2", 90)).unwrap(), k_new.public_key_raw()).is_err());
-        // anderer Aussteller
+        // different issuer
         let ca2 = ca();
         let mut other_ca = cert_info(&issue(&ca2, &k_new, "host-1", 90)).unwrap();
         other_ca.issuer.push('x');
         assert!(check_new(&old, &other_ca, k_new.public_key_raw()).is_err());
-        // nicht länger gültig
+        // no longer valid
         assert!(check_new(&old, &cert_info(&issue(&ca1, &k_new, "host-1", 2)).unwrap(), k_new.public_key_raw()).is_err());
     }
 
@@ -185,17 +186,17 @@ mod tests {
         let cfg: AgentConfig = toml::from_str(&format!("server = \"https://x\"\ndata_dir = {:?}", d.path().to_string_lossy())).unwrap();
         std::fs::write(cfg.key_path(), "alt-key").unwrap();
         std::fs::write(cfg.cert_path(), "alt-crt").unwrap();
-        install(&cfg, "neu-key", "neu-crt").unwrap();
-        assert_eq!(std::fs::read_to_string(cfg.key_path()).unwrap(), "neu-key");
-        assert_eq!(std::fs::read_to_string(cfg.cert_path()).unwrap(), "neu-crt");
+        install(&cfg, "new-key", "new-crt").unwrap();
+        assert_eq!(std::fs::read_to_string(cfg.key_path()).unwrap(), "new-key");
+        assert_eq!(std::fs::read_to_string(cfg.cert_path()).unwrap(), "new-crt");
         assert_eq!(std::fs::metadata(cfg.key_path()).unwrap().permissions().mode() & 0o777, 0o600);
-        // Absturz nach dem Festschreiben, vor dem Umbenennen → beim Start abgeschlossen
+        // crash after committing, before renaming → completed at startup
         std::fs::write(pending_key(&cfg), "k3").unwrap();
         std::fs::write(pending_crt(&cfg), "c3").unwrap();
         recover_pending(&cfg);
         assert_eq!(std::fs::read_to_string(cfg.key_path()).unwrap(), "k3");
         assert_eq!(std::fs::read_to_string(cfg.cert_path()).unwrap(), "c3");
-        // Absturz vor dem Festschreiben → alter Stand bleibt
+        // crash before committing → the old state remains
         std::fs::write(pending_key(&cfg), "k4").unwrap();
         recover_pending(&cfg);
         assert_eq!(std::fs::read_to_string(cfg.key_path()).unwrap(), "k3");

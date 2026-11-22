@@ -1,17 +1,17 @@
-//! Pfade in Container-Wurzeln erkennen (systemd-nspawn, LXC/LXD/Incus, Docker- und Podman-Schreibschicht).
-//! Regeln und Erkennungen werten dann den Pfad *im* Container aus – dieselben Ausnahmen (Logs, Datenbanken)
-//! und dieselben Schutzregeln (Web-Ordner, /etc) wie auf dem Server.
+//! Detect paths inside container roots (systemd-nspawn, LXC/LXD/Incus, Docker and Podman writable layer).
+//! Rules and detections then evaluate the path *inside* the container – the same exceptions (logs, databases)
+//! and the same protection rules (web folders, /etc) as on the host.
 
-/// (Wurzel-Präfix ohne abschließenden Schrägstrich, Bezeichnung) – Bezeichnung z. B. „app“ oder „docker:3f2a9c1b7d4e“
+/// (root prefix without trailing slash, label) – label e.g. "app" or "docker:3f2a9c1b7d4e"
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ContainerPath<'a> {
     pub root: &'a str,
     pub label: String,
-    /// Pfad im Container, beginnt mit „/“
+    /// Path inside the container, starts with "/"
     pub rel: &'a str,
 }
 
-/// Bekannte Container-Wurzeln: (Präfix, Anzahl Namensteile, Suffix nach dem Namen)
+/// Known container roots: (prefix, number of name components, suffix after the name)
 const ROOTS: &[(&str, &str, &str)] = &[
     ("/var/lib/machines/", "", ""),
     ("/var/lib/lxc/", "", "/rootfs"),
@@ -33,7 +33,7 @@ pub fn container_path(path: &str) -> Option<ContainerPath<'_>> {
         let rel_start = if suffix.is_empty() {
             prefix.len() + name.len()
         } else {
-            // Name gefolgt von /rootfs bzw. /diff – sonst ist es kein Dateisystem des Containers
+            // name followed by /rootfs or /diff – otherwise it is not a filesystem of the container
             if !tail.starts_with(&format!("{suffix}/")) && tail != *suffix {
                 return None;
             }
@@ -46,7 +46,7 @@ pub fn container_path(path: &str) -> Option<ContainerPath<'_>> {
     None
 }
 
-/// Pfad, an dem Regeln ausgewertet werden (im Container der Pfad dort, sonst unverändert)
+/// Path at which rules are evaluated (for a container the path inside it, otherwise unchanged)
 pub fn effective(path: &str) -> &str {
     container_path(path).map(|c| c.rel).unwrap_or(path)
 }
@@ -61,7 +61,7 @@ mod tests {
         assert_eq!((c.root, c.label.as_str(), c.rel), ("/var/lib/machines/app", "app", "/var/www/shop/index.php"));
         let d = container_path("/var/lib/docker/overlay2/3f2a9c1b7d4e5f60718293a4b5c6d7e8/diff/var/www/html/x.php").unwrap();
         assert_eq!((d.label.as_str(), d.rel), ("docker:3f2a9c1b7d4e", "/var/www/html/x.php"));
-        assert!(container_path("/var/lib/docker/overlay2/3f2a9c1b7d4e/merged/etc/passwd").is_none()); // nur die Schreibschicht
+        assert!(container_path("/var/lib/docker/overlay2/3f2a9c1b7d4e/merged/etc/passwd").is_none()); // only the writable layer
         assert_eq!(container_path("/var/lib/lxc/web1/rootfs/etc/passwd").unwrap().rel, "/etc/passwd");
         assert!(container_path("/var/lib/lxc/web1/config").is_none());
         assert!(container_path("/var/www/shop/index.php").is_none());

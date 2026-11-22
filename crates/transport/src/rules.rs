@@ -1,9 +1,10 @@
-//! YARA-Regelpaket laden.
+//! Load the YARA rule package.
 //!
-//! Wie das Agent-Update: Manifest mit einem eingebauten Release-Schlüssel signiert (Epoche ≥ bekannte), Produkt
-//! `tyrosecd-rules`, nicht abgelaufen, Version höher als die geladene, nur von einer erlaubten Quelle. Jede Datei mit
-//! Größenlimit und SHA-256 aus dem Manifest. Abgelegt unter `<data_dir>/rules/<version>/` (0700/0600), danach
-//! `<data_dir>/rules/current` mit der Version. Der Agent lädt die Regeln erst danach (eigener Baustein `tyrosd-yara`).
+//! Like the agent update: manifest signed with a built-in release key (epoch ≥ known), product
+//! `tyrosecd-rules`, not expired, version higher than the loaded one, only from an allowed source. Every file with
+//! a size limit and SHA-256 from the manifest. Stored under `<data_dir>/rules/<version>/` (0700/0600), then
+//! `<data_dir>/rules/current` with the version. The agent loads the rules only afterwards
+//! (separate crate `tyrosd-yara`).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -16,7 +17,7 @@ use crate::update::{fetch_limited, known_epoch, release_keys, Manifest};
 
 pub const PRODUCT: &str = "tyrosecd-rules";
 
-/// Stand des geladenen Pakets für den Heartbeat (setzt der Agent nach dem Laden)
+/// State of the loaded package for the heartbeat (set by the agent after loading)
 #[derive(Clone, Debug, Default)]
 pub struct Status {
     pub version: String,
@@ -30,10 +31,10 @@ pub static STATUS: std::sync::Mutex<Status> = std::sync::Mutex::new(Status { ver
 pub fn status() -> Status {
     STATUS.lock().map(|s| s.clone()).unwrap_or_default()
 }
-/// Dateien eines Pakets mit Höchstgröße
+/// Files of a package with maximum size
 pub const FILES: &[(&str, u64)] = &[("rules.yar.zst", 16 << 20), ("rules.json", 16 << 20), ("NOTICE", 4 << 20)];
 
-/// „r12“ → 12
+/// "r12" → 12
 pub fn number(v: &str) -> Option<u64> {
     let n = v.strip_prefix('r')?;
     if n.is_empty() || n.len() > 6 || !n.bytes().all(|b| b.is_ascii_digit()) {
@@ -42,7 +43,7 @@ pub fn number(v: &str) -> Option<u64> {
     n.parse().ok()
 }
 
-/// geladene Version (Datei `current`), sofern das Verzeichnis vollständig ist
+/// loaded version (file `current`), provided the directory is complete
 pub fn current(data_dir: &str) -> Option<String> {
     let v = std::fs::read_to_string(format!("{data_dir}/rules/current")).ok()?.trim().to_string();
     number(&v)?;
@@ -53,38 +54,38 @@ pub fn dir(data_dir: &str, version: &str) -> PathBuf {
     PathBuf::from(format!("{data_dir}/rules/{version}"))
 }
 
-/// Manifest prüfen (Signatur, widerrufene Schlüssel, Produkt, Ablauf); Versionsvergleich übernimmt der Aufrufer
+/// Verify the manifest (signature, revoked keys, product, expiry); the version comparison is done by the caller
 pub fn verify(raw: &[u8], sig: &[u8], keys: &[(&[u8; 32], u32)], min_epoch: u32) -> Result<Manifest> {
     let valid = |k: &[u8; 32]| ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &k[..]).verify(raw, sig).is_ok();
     let Some((_, epoch)) = keys.iter().filter(|(k, _)| valid(k)).max_by_key(|(_, e)| *e).copied() else {
-        bail!("Signatur des Regelpakets ungültig – abgelehnt");
+        bail!("rule package signature invalid – rejected");
     };
     if epoch < min_epoch {
-        bail!("Regelpaket mit widerrufenem Schlüssel (Epoche {epoch} < {min_epoch}) – abgelehnt");
+        bail!("rule package with revoked key (epoch {epoch} < {min_epoch}) – rejected");
     }
     let m: Manifest = serde_json::from_slice(raw).context("Manifest")?;
     if m.product != PRODUCT {
-        bail!("Manifest für falsches Produkt: {}", m.product);
+        bail!("manifest for the wrong product: {}", m.product);
     }
     if let Some(d) = m.key_epoch {
         if d != epoch {
-            bail!("Schlüssel-Epoche im Manifest ({d}) passt nicht zum Signierschlüssel ({epoch})");
+            bail!("key epoch in the manifest ({d}) does not match the signing key ({epoch})");
         }
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     if m.expires == 0 || m.expires < now {
-        bail!("Regelpaket {} ist abgelaufen oder ohne Ablaufdatum", m.version);
+        bail!("rule package {} has expired or has no expiry date", m.version);
     }
-    number(&m.version).ok_or_else(|| anyhow!("Regelpaket: Version „{}“ ungültig", m.version))?;
+    number(&m.version).ok_or_else(|| anyhow!("rule package: version “{}” invalid", m.version))?;
     for (f, _) in FILES {
         if !m.files.contains_key(*f) {
-            bail!("Regelpaket {}: Datei {f} fehlt im Manifest", m.version);
+            bail!("rule package {}: file {f} missing from the manifest", m.version);
         }
     }
     Ok(m)
 }
 
-/// Paket von `base` (…/rules/<version>) holen, wenn es höher ist als `have`. Ok(Some(version)) nach dem Ablegen.
+/// Fetch the package from `base` (…/rules/<version>) if it is higher than `have`. Ok(Some(version)) after storing it.
 pub fn fetch_newer(base: &str, data_dir: &str, have: Option<&str>) -> Result<Option<String>> {
     let base = base.trim_end_matches('/');
     let raw = fetch_limited(&format!("{base}/manifest.json"), 1 << 20)?;
@@ -102,11 +103,11 @@ pub fn fetch_newer(base: &str, data_dir: &str, have: Option<&str>) -> Result<Opt
         for (f, limit) in FILES {
             let info = &m.files[*f];
             if info.size > *limit {
-                bail!("{f}: {} Bytes über dem Limit", info.size);
+                bail!("{f}: {} bytes over the limit", info.size);
             }
             let data = fetch_limited(&format!("{base}/{f}"), info.size + 1)?;
             if data.len() as u64 != info.size || hex::encode(sha2::Sha256::digest(&data)) != info.sha256 {
-                bail!("{f}: Größe oder Prüfsumme passt nicht zum Manifest");
+                bail!("{f}: size or checksum does not match the manifest");
             }
             write_private(&tmp.join(f), &data)?;
         }
@@ -120,7 +121,7 @@ pub fn fetch_newer(base: &str, data_dir: &str, have: Option<&str>) -> Result<Opt
     let _ = std::fs::remove_dir_all(&target);
     std::fs::rename(&tmp, &target).with_context(|| format!("{}", target.display()))?;
     write_private(Path::new(&format!("{data_dir}/rules/current")), m.version.as_bytes())?;
-    // ältere Pakete aufräumen (nur gültige Versionsordner, das vorige bleibt als Rückfall)
+    // clean up older packages (only valid version directories; the previous one stays as a fallback)
     if let Ok(rd) = std::fs::read_dir(format!("{data_dir}/rules")) {
         let mut olds: Vec<(u64, PathBuf)> = rd
             .flatten()
@@ -135,7 +136,7 @@ pub fn fetch_newer(base: &str, data_dir: &str, have: Option<&str>) -> Result<Opt
     Ok(Some(m.version))
 }
 
-/// vorige Version als Rückfall (wenn die neue nicht lädt)
+/// previous version as a fallback (if the new one does not load)
 pub fn fall_back(data_dir: &str, bad: &str) -> Option<String> {
     let bad_n = number(bad)?;
     let prev = std::fs::read_dir(format!("{data_dir}/rules"))
@@ -208,18 +209,18 @@ mod tests {
         let files: Vec<(&str, &[u8])> = vec![("rules.yar.zst", b"a"), ("rules.json", b"b"), ("NOTICE", b"c")];
         let ok = manifest(PRODUCT, "r3", later(), &files);
         assert_eq!(verify(&ok, k.sign(&ok).as_ref(), &keys, 0).unwrap().version, "r3");
-        // Agent-Manifest ist kein Regelpaket (und umgekehrt prüft der Agent-Updater das Produkt)
+        // an agent manifest is not a rule package (and conversely the agent updater checks the product)
         let agent = manifest("tyrosecd-agent", "r3", later(), &files);
         assert!(verify(&agent, k.sign(&agent).as_ref(), &keys, 0).is_err());
-        // fremder Schlüssel
+        // foreign key
         let other = key();
         assert!(verify(&ok, other.sign(&ok).as_ref(), &keys, 0).is_err());
-        // widerrufene Epoche
+        // revoked epoch
         assert!(verify(&ok, k.sign(&ok).as_ref(), &keys, 1).is_err());
-        // abgelaufen
+        // expired
         let old = manifest(PRODUCT, "r3", 1, &files);
         assert!(verify(&old, k.sign(&old).as_ref(), &keys, 0).is_err());
-        // Datei fehlt
+        // file missing
         let short = manifest(PRODUCT, "r3", later(), &files[..2]);
         assert!(verify(&short, k.sign(&short).as_ref(), &keys, 0).is_err());
     }

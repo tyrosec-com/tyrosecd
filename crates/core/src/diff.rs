@@ -1,12 +1,12 @@
-//! Diff und Patch auf Byte-Ebene (kein UTF-8-Zwang, Latin-1 und CRLF
-//! bleiben erhalten). Dieselbe Bibliothek erzeugt und wendet an, damit der
-//! spätere Ingest exakt dieselbe Semantik hat (Hauptplan 27, Spike Tag 5).
+//! Byte-level diff and patch (no UTF-8 requirement, Latin-1 and CRLF
+//! are preserved). The same library creates and applies them, so that the
+//! later ingest has exactly the same semantics (main plan 27, spike day 5).
 
 use anyhow::{anyhow, Result};
 
 pub struct DiffResult {
     pub patch: Vec<u8>,
-    /// Anzahl geänderter Zeilen (+ und −).
+    /// Number of changed lines (+ and −).
     pub changed_lines: u32,
 }
 
@@ -26,8 +26,8 @@ pub fn make_patch(old: &[u8], new: &[u8]) -> DiffResult {
 }
 
 pub fn apply_patch(old: &[u8], patch: &[u8]) -> Result<Vec<u8>> {
-    let p = diffy::Patch::from_bytes(patch).map_err(|e| anyhow!("Patch nicht lesbar: {e}"))?;
-    diffy::apply_bytes(old, &p).map_err(|e| anyhow!("Patch nicht anwendbar: {e}"))
+    let p = diffy::Patch::from_bytes(patch).map_err(|e| anyhow!("patch not readable: {e}"))?;
+    diffy::apply_bytes(old, &p).map_err(|e| anyhow!("patch cannot be applied: {e}"))
 }
 
 #[cfg(test)]
@@ -41,7 +41,7 @@ mod tests {
         assert_eq!(
             hash_bytes(Algo::Sha256, &applied),
             hash_bytes(Algo::Sha256, new),
-            "Round-Trip fehlgeschlagen"
+            "round trip failed"
         );
     }
 
@@ -61,7 +61,7 @@ mod tests {
     }
     #[test]
     fn latin1() {
-        roundtrip(b"<?php echo 'Gr\xfc\xdfe';\n", b"<?php echo 'Gr\xfc\xdfe Welt';\n");
+        roundtrip(b"<?php echo 'Gr\xfc\xdfe';\n", b"<?php echo 'Gr\xfc\xdfe World';\n");
     }
     #[test]
     fn empty_and_long_lines() {

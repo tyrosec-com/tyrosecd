@@ -1,8 +1,8 @@
-//! YARA-Regelpaket laden und Dateien prüfen.
+//! Load the YARA rule package and scan files.
 //!
-//! Das Paket (`rules.yar.zst`, `rules.json`) holt und prüft `tyrosd_transport::rules`; hier wird es kompiliert
-//! (boreal, reines Rust) und für Prüfungen bereitgehalten. Regeln liegen nie im Programm (Virenscanner melden
-//! Signatur-Quelltext als Schadcode), auf der Platte nur komprimiert.
+//! The package (`rules.yar.zst`, `rules.json`) is fetched and verified by `tyrosd_transport::rules`; here it is
+//! compiled (boreal, pure Rust) and kept ready for scans. Rules are never embedded in the binary (antivirus
+//! scanners flag signature source text as malware), and on disk they are stored only compressed.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -10,10 +10,10 @@ use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 
-/// externe Variablen, die manche Regeln erwarten (Dateiname usw.) – leer vorbelegt
+/// external variables that some rules expect (file name etc.) – pre-set to empty
 const EXTERNALS: &[&str] = &["filename", "filepath", "extension", "filetype", "owner"];
 
-/// Zeitlimit je Datei
+/// Time limit per file
 pub const SCAN_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, Default, serde::Deserialize)]
@@ -59,34 +59,34 @@ struct MetaFile {
 }
 
 impl Engine {
-    /// Paket aus `dir` (rules.yar.zst + rules.json) kompilieren
+    /// Compile the package from `dir` (rules.yar.zst + rules.json)
     pub fn load(dir: &Path, version: &str) -> Result<Engine> {
         let t = Instant::now();
         let zst = std::fs::read(dir.join("rules.yar.zst")).with_context(|| format!("{}", dir.display()))?;
-        let src = String::from_utf8(zstd::decode_all(zst.as_slice()).context("rules.yar.zst entpacken")?).context("Regeln kein UTF-8")?;
+        let src = String::from_utf8(zstd::decode_all(zst.as_slice()).context("unpack rules.yar.zst")?).context("rules are not UTF-8")?;
         let meta: MetaFile = serde_json::from_slice(&std::fs::read(dir.join("rules.json"))?).context("rules.json")?;
         let e = Self::compile(&src, version, meta.rules)?;
         Ok(Engine { compile_ms: t.elapsed().as_millis() as u64, ..e })
     }
 
-    /// Regeln aus Quelltext (auch für Tests)
+    /// Rules from source text (also for tests)
     pub fn compile(src: &str, version: &str, meta: Vec<Meta>) -> Result<Engine> {
         let mut c = boreal::Compiler::new();
         for x in EXTERNALS {
             let _ = c.define_symbol(*x, "");
         }
-        c.add_rules_str(src).map_err(|e| anyhow!("Regeln kompilieren nicht: {}", format!("{e:?}").chars().take(300).collect::<String>()))?;
+        c.add_rules_str(src).map_err(|e| anyhow!("rules do not compile: {}", format!("{e:?}").chars().take(300).collect::<String>()))?;
         let mut scanner = c.finalize();
         scanner.set_scan_params(boreal::scanner::ScanParams::default().timeout_duration(Some(SCAN_TIMEOUT)));
         let count = src.lines().filter(|l| { let t = l.trim_start(); t.starts_with("rule ") || t.starts_with("private rule ") }).count();
         Ok(Engine { scanner, version: version.to_string(), count, compile_ms: 0, meta: meta.into_iter().map(|m| (m.name.clone(), m)).collect() })
     }
 
-    /// Treffer in `data`; private Hilfsregeln (ohne Eintrag in rules.json) zählen nicht
+    /// Matches in `data`; private helper rules (without an entry in rules.json) do not count
     pub fn scan(&self, data: &[u8]) -> Vec<Hit> {
         let rules = match self.scanner.scan_mem(data) {
             Ok(r) => r.rules,
-            // Zeitlimit: bis dahin gefundene Treffer gelten
+            // time limit: matches found up to that point are kept
             Err((_, r)) => r.rules,
         };
         let mut hits: Vec<Hit> = rules
@@ -108,7 +108,7 @@ impl Engine {
     }
 }
 
-/// Schwere aus dem höchsten Score: ≥ 80 kritisch, ≥ 60 hoch, sonst mittel
+/// Severity from the highest score: ≥ 80 critical, ≥ 60 high, otherwise medium
 pub fn severity(hits: &[Hit]) -> &'static str {
     match hits.iter().map(|h| h.score).max().unwrap_or(0) {
         s if s >= 80 => "critical",
@@ -117,17 +117,18 @@ pub fn severity(hits: &[Hit]) -> &'static str {
     }
 }
 
-/// Beleg für die Zentrale: je Regel Name, Art, Autor (DRL 1.1 verlangt Nennung), Quelle, Beschreibung
+/// Evidence for the central server: per rule name, kind, author (DRL 1.1 requires attribution), source,
+/// description
 pub fn detail(path: &str, hits: &[Hit]) -> String {
-    let mut s = format!("{path}\nYARA-Regeln:");
+    let mut s = format!("{path}\nYARA rules:");
     for h in hits.iter().take(8) {
-        s += &format!("\n- {} ({}; Autor: {}; Quelle: {})", h.rule, if h.category.is_empty() { "-" } else { &h.category }, if h.author.is_empty() { "-" } else { &h.author }, h.source);
+        s += &format!("\n- {} ({}; author: {}; source: {})", h.rule, if h.category.is_empty() { "-" } else { &h.category }, if h.author.is_empty() { "-" } else { &h.author }, h.source);
         if !h.description.is_empty() {
             s += &format!(": {}", h.description.chars().take(160).collect::<String>());
         }
     }
     if hits.len() > 8 {
-        s += &format!("\n… und {} weitere", hits.len() - 8);
+        s += &format!("\n… and {} more", hits.len() - 8);
     }
     s
 }
@@ -157,9 +158,9 @@ rule t_weak { strings: $a = "c99shell" condition: $a }
         let h = e.scan(b"<?php eval(base64_decode($x)); // c99shell");
         assert_eq!(h.iter().map(|x| x.rule.as_str()).collect::<Vec<_>>(), vec!["t_eval", "t_weak"]);
         assert_eq!(severity(&h), "critical");
-        assert!(detail("/var/www/x.php", &h).contains("t_eval (webshell; Autor: tyrosec; Quelle: tyrosec)"));
-        assert!(e.scan(b"harmlos").is_empty());
-        // private Hilfsregel erscheint nie als Treffer
+        assert!(detail("/var/www/x.php", &h).contains("t_eval (webshell; author: tyrosec; source: tyrosec)"));
+        assert!(e.scan(b"harmless").is_empty());
+        // a private helper rule never appears as a match
         assert!(e.scan(b"<?php echo 1;").is_empty());
         assert_eq!(severity(&e.scan(b"c99shell")), "medium");
     }
@@ -172,7 +173,7 @@ rule t_weak { strings: $a = "c99shell" condition: $a }
         let e = Engine::load(d.path(), "r1").unwrap();
         assert_eq!(e.version, "r1");
         assert_eq!(e.scan(b"<?php eval( base64_decode(1)").len(), 1);
-        // kaputtes Paket → Fehler (Agent behält die alte Version)
+        // broken package → error (agent keeps the old version)
         std::fs::write(d.path().join("rules.yar.zst"), zstd::encode_all(&b"rule x { condition: nope }"[..], 3).unwrap()).unwrap();
         assert!(Engine::load(d.path(), "r1").is_err());
     }

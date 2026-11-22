@@ -1,4 +1,4 @@
-//! Stufe C: Shop-Erkennung in den Webroots und ausgehende Verbindungen (Egress-Inventar).
+//! Stage C: shop detection in the webroots and outgoing connections (egress inventory).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -29,7 +29,7 @@ fn grep_version(file: &Path, re: &str) -> String {
     regex_lite(&s, re)
 }
 
-/// sehr kleine Suche ohne Regex-Abhängigkeit: Text nach `marker` bis zum nächsten Anführungszeichen
+/// very small search without a regex dependency: text after `marker` up to the next quotation mark
 fn regex_lite(s: &str, marker: &str) -> String {
     s.find(marker)
         .map(|i| s[i + marker.len()..].trim_start_matches([' ', '=', '\'', '"', ',', '(']).chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect())
@@ -84,7 +84,7 @@ pub struct Egress {
     pub count: u32,
 }
 
-/// Ausgehende TCP-Verbindungen nach Prozess und Ziel (ohne lokale und ohne eingehende auf offene Ports)
+/// Outgoing TCP connections by process and destination (without local ones and without incoming ones on open ports)
 pub fn egress(listen_ports: &[u16]) -> Vec<Egress> {
     let conns = tyrosd_detect::net::established();
     if conns.is_empty() {
@@ -94,7 +94,7 @@ pub fn egress(listen_ports: &[u16]) -> Vec<Egress> {
     let mut agg: BTreeMap<(String, String, u16), (String, u32)> = BTreeMap::new();
     for c in conns {
         if c.remote_is_local() || listen_ports.contains(&c.lport) {
-            continue; // eingehende Verbindung auf einen Dienst
+            continue; // incoming connection to a service
         }
         let (comm, exe) = owners
             .get(&c.inode)

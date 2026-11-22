@@ -1,8 +1,8 @@
-//! Server-Inventar: laufende Dienste, Prozesse (gruppiert), offene Ports mit
-//! Bindung, Firewall-Zusammenfassung (Hauptplan 22, 24.8 – vorgezogen).
+//! Server inventory: running services, processes (grouped), open ports with
+//! binding, firewall summary (main plan 22, 24.8 – brought forward).
 //!
-//! Nur lesend; nutzt vorhandene Werkzeuge (systemctl, nft, iptables-save, ufw,
-//! firewall-cmd), wenn sie da sind. Nichts wird installiert oder geändert.
+//! Read-only; uses existing tools (systemctl, nft, iptables-save, ufw,
+//! firewall-cmd) if present. Nothing is installed or changed.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::process::Command;
@@ -22,25 +22,25 @@ pub struct Inventory {
     pub processes: Vec<ProcGroup>,
     pub listeners: Vec<Listener>,
     pub firewall: Firewall,
-    /// installierte Software für den Schwachstellen-Abgleich (Zentrale)
+    /// installed software for vulnerability matching (server)
     pub software: software::Software,
-    /// SSH-Server-Einstellungen und „Neustart nötig“ (Sicherheitswert)
+    /// SSH server settings and "reboot required" (security score)
     pub ssh: host::Ssh,
     pub reboot: host::Reboot,
-    /// erkannte Shops (Stufe C1) und ausgehende Verbindungen (Stufe C3)
+    /// detected shops (stage C1) and outgoing connections (stage C3)
     pub shops: Vec<shop::Shop>,
     pub egress: Vec<shop::Egress>,
-    /// erkannte Backups mit Zeitpunkt des jüngsten (ab 0.3.0)
+    /// detected backups with the time of the most recent one (since 0.3.0)
     pub backups: Vec<backup::Backup>,
-    /// Domains aus der Webserver-Konfiguration (server_name/ServerName) – für TLS- und Erreichbarkeitsprüfung der Zentrale
+    /// Domains from the web server configuration (server_name/ServerName) – for the server's TLS and reachability checks
     pub sites: Vec<String>,
-    /// Container mit eigenen Paketen (Pakete stehen in software.packages mit location „container:<name>“)
+    /// Containers with their own packages (packages are in software.packages with location "container:<name>")
     pub containers: Vec<containers::Container>,
-    /// erkannte Webroots (ab 0.4.15) – Orte, an denen die Zentrale Köder anlegen lassen kann; füllt der Agent
+    /// detected webroots (since 0.4.15) – places where the server can have decoys created; filled in by the agent
     pub webroots: Vec<String>,
-    /// MySQL/MariaDB-Protokolleinstellung (ab 0.4.16, Köder Phase 2)
+    /// MySQL/MariaDB logging setting (since 0.4.16, decoys phase 2)
     pub mysql_conf: dbconf::MysqlConf,
-    /// Beaconing-Stichprobe: zuletzt abgeschlossene Stunde (ab 0.5.2; neue ausgehende Verbindungen je Minute)
+    /// Beaconing sample: last completed hour (since 0.5.2; new outgoing connections per minute)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub beacons: Option<tyrosd_detect::beacon::BeaconHour>,
 }
@@ -53,7 +53,7 @@ pub struct Service {
 
 #[derive(Serialize, Debug, Clone)]
 pub struct ProcGroup {
-    /// erkannte Anwendung (z. B. „PHP-FPM“), sonst Programmname
+    /// detected application (e.g. "PHP-FPM"), otherwise the program name
     pub app: String,
     pub exe: String,
     pub count: u32,
@@ -70,7 +70,7 @@ pub struct Listener {
     pub scope: String,
     pub process: String,
     pub pid: i32,
-    /// blocked | allowed | unknown (Host-Firewall; Hoster-Firewall ist nicht sichtbar)
+    /// blocked | allowed | unknown (host firewall; the hoster's firewall is not visible)
     pub firewall: String,
 }
 
@@ -79,14 +79,14 @@ pub struct Firewall {
     /// nftables | iptables | ufw | firewalld | none
     pub backend: String,
     pub active: bool,
-    /// accept | drop | reject | unknown (eingehend, IPv4)
+    /// accept | drop | reject | unknown (incoming, IPv4)
     pub input_policy: String,
     pub allowed_ports: Vec<u16>,
     pub rules: u32,
     pub detail: String,
 }
 
-/// Bekannte Anwendungen anhand von Programm und Kommandozeile.
+/// Known applications based on program and command line.
 fn app_name(comm: &str, exe: &str, cmd: &str) -> Option<&'static str> {
     let base = exe.rsplit('/').next().unwrap_or(comm);
     let c = cmd.to_ascii_lowercase();
@@ -145,7 +145,7 @@ pub fn processes() -> Vec<ProcGroup> {
         let field = |k: &str| status.lines().find(|l| l.starts_with(k)).and_then(|l| l.split_whitespace().nth(1)).unwrap_or("");
         let rss_kb: u64 = field("VmRSS:").parse().unwrap_or(0);
         if rss_kb == 0 {
-            continue; // Kernel-Threads
+            continue; // kernel threads
         }
         let comm = field("Name:").to_string();
         let uid: u32 = field("Uid:").parse().unwrap_or(0);
@@ -198,7 +198,7 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
     Some(String::from_utf8_lossy(&o.stdout).into_owned())
 }
 
-/// Ports aus „dport 80“, „--dport 443“, „dport { 80, 443 }“, „22/tcp ALLOW“.
+/// Ports from "dport 80", "--dport 443", "dport { 80, 443 }", "22/tcp ALLOW".
 fn ports_in(s: &str, out: &mut BTreeSet<u16>) {
     let t = s.replace(['{', '}', ','], " ");
     let w: Vec<&str> = t.split_whitespace().collect();
@@ -228,12 +228,12 @@ fn ports_in(s: &str, out: &mut BTreeSet<u16>) {
 pub fn firewall() -> Firewall {
     let mut fw = Firewall { backend: "none".into(), input_policy: "unknown".into(), ..Default::default() };
     let mut allowed = BTreeSet::new();
-    // ufw aus den Konfigurationsdateien (funktioniert auch im gehärteten Dienst ohne
-    // CAP_NET_ADMIN und ohne beschreibbares /run, anders als `ufw status`)
+    // ufw from the configuration files (also works in the hardened service without
+    // CAP_NET_ADMIN and without a writable /run, unlike `ufw status`)
     if let Some(f) = ufw_from_files() {
         return f;
     }
-    // ufw (Ubuntu) – sagt am meisten über die Absicht
+    // ufw (Ubuntu) – says the most about the intent
     if let Some(s) = run("ufw", &["status", "verbose"]) {
         if s.contains("Status: active") {
             fw.backend = "ufw".into();
@@ -254,7 +254,7 @@ pub fn firewall() -> Firewall {
         if s.trim() == "running" {
             fw.backend = "firewalld".into();
             fw.active = true;
-            fw.input_policy = "drop".into(); // Standardzone verwirft Nicht-Freigegebenes
+            fw.input_policy = "drop".into(); // default zone drops anything not allowed
             if let Some(all) = run("firewall-cmd", &["--list-all"]) {
                 for l in all.lines() {
                     let l = l.trim();
@@ -304,7 +304,7 @@ pub fn firewall() -> Firewall {
             return fw;
         }
     }
-    // iptables (legacy oder nft-Wrapper)
+    // iptables (legacy or nft wrapper)
     if let Some(s) = run("iptables-save", &[]) {
         let rules = s.lines().filter(|l| l.starts_with("-A ")).count() as u32;
         let policy = s.lines().find_map(|l| l.strip_prefix(":INPUT ")).and_then(|l| l.split_whitespace().next()).unwrap_or("ACCEPT");
@@ -323,7 +323,7 @@ pub fn firewall() -> Firewall {
     fw
 }
 
-/// ufw-Zustand aus /etc/ufw (aktiv?, Standard-Richtlinie, freigegebene Ports).
+/// ufw state from /etc/ufw (active?, default policy, allowed ports).
 fn ufw_from_files() -> Option<Firewall> {
     let conf = std::fs::read_to_string("/etc/ufw/ufw.conf").ok()?;
     let enabled = conf.lines().any(|l| l.trim().eq_ignore_ascii_case("ENABLED=yes"));
@@ -366,7 +366,7 @@ fn ufw_from_files() -> Option<Firewall> {
         input_policy: if policy == "accept" { "accept".into() } else if policy == "reject" { "reject".into() } else { "drop".into() },
         allowed_ports: allowed.into_iter().collect(),
         rules,
-        detail: "aus /etc/ufw gelesen".into(),
+        detail: "read from /etc/ufw".into(),
     })
 }
 
@@ -429,7 +429,7 @@ pub fn collect() -> Inventory {
     }
 }
 
-/// Domains aller Websites (ohne Platzhalter, Wildcards, IPs), höchstens 50
+/// Domains of all websites (without placeholders, wildcards, IPs), at most 50
 pub fn sites() -> Vec<String> {
     let mut v: Vec<String> = tyrosd_source_weblog::docroots()
         .into_iter()
@@ -442,7 +442,7 @@ pub fn sites() -> Vec<String> {
     v
 }
 
-/// Fingerabdruck für „hat sich etwas geändert?“ (ohne RAM/Anzahl, die schwanken).
+/// Fingerprint for "has anything changed?" (without RAM/count, which fluctuate).
 pub fn fingerprint(inv: &Inventory) -> String {
     let mut s = String::new();
     for c in &inv.containers {
@@ -452,7 +452,7 @@ pub fn fingerprint(inv: &Inventory) -> String {
         s.push_str(d);
         s.push('\n');
     }
-    // neues Backup → Inventar erneut senden (Zeitpunkt auf die Stunde genau)
+    // new backup → send the inventory again (time rounded to the hour)
     for b in &inv.backups {
         s.push_str(&format!("{}:{}:{}\n", b.kind, b.path, b.last / 3600));
     }
@@ -476,7 +476,7 @@ pub fn fingerprint(inv: &Inventory) -> String {
     for x in &inv.shops {
         s.push_str(&format!("\nshop:{}:{}:{}", x.kind, x.root, x.version));
     }
-    // Egress: nur Prozess + Ziel-Port (Ziel-IPs und Anzahl schwanken ständig)
+    // Egress: only process + destination port (destination IPs and counts change constantly)
     let mut eg: Vec<String> = inv.egress.iter().map(|e| format!("{}:{}", e.process, e.port)).collect();
     eg.sort();
     eg.dedup();

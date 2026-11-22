@@ -1,6 +1,6 @@
-//! Persistenz-Inventur: Benutzer, SSH-Keys, Cron, systemd, ld.so.preload,
-//! PAM, Profile, sudoers, Kernel-Module. Jeder Eintrag landet in
-//! „bitte bestätigen“, Auffälliges zusätzlich als Fund.
+//! Persistence inventory: users, SSH keys, cron, systemd, ld.so.preload,
+//! PAM, profiles, sudoers, kernel modules. Every entry ends up in
+//! "please confirm", anything suspicious additionally as a finding.
 
 use std::sync::OnceLock;
 
@@ -48,7 +48,7 @@ fn active(l: &str) -> bool {
     !t.is_empty() && !t.starts_with('#')
 }
 
-/// OpenSSH-Fingerprint SHA256:… aus einer authorized_keys-Zeile.
+/// OpenSSH fingerprint SHA256:… from an authorized_keys line.
 pub fn key_fingerprint(line: &str) -> Option<(String, String, String)> {
     let parts: Vec<&str> = line.split_whitespace().collect();
     let idx = parts.iter().position(|p| p.starts_with("ssh-") || p.starts_with("ecdsa-") || p.starts_with("sk-"))?;
@@ -56,23 +56,23 @@ pub fn key_fingerprint(line: &str) -> Option<(String, String, String)> {
     let blob = base64::engine::general_purpose::STANDARD.decode(parts.get(idx + 1)?).ok()?;
     let fp = base64::engine::general_purpose::STANDARD_NO_PAD.encode(sha2::Sha256::digest(&blob));
     let comment = parts[idx + 2..].join(" ");
-    let opts = if idx > 0 { format!(" [Optionen: {}]", parts[..idx].join(" ")) } else { String::new() };
+    let opts = if idx > 0 { format!(" [options: {}]", parts[..idx].join(" ")) } else { String::new() };
     Some((ktype, format!("SHA256:{fp}"), format!("{comment}{opts}")))
 }
 
 pub fn check(ctx: &mut Ctx) {
     let us = users(ctx);
-    // Benutzer
+    // users
     for u in &us {
         if u.uid == 0 && u.name != "root" {
-            ctx.add(Severity::Critical, Category::Persistence, "uid0_user", format!("Zusätzlicher Benutzer mit UID 0: {}", u.name), Some(ctx.p("/etc/passwd")), None);
+            ctx.add(Severity::Critical, Category::Persistence, "uid0_user", format!("Additional user with UID 0: {}", u.name), Some(ctx.p("/etc/passwd")), None);
         }
         let login = !(u.shell.ends_with("nologin") || u.shell.ends_with("false") || u.shell.is_empty() || u.shell.ends_with("sync"));
         if login {
             ctx.confirm("login_user", ctx.p("/etc/passwd"), format!("{} (uid {}, {})", u.name, u.uid, u.shell));
             if u.uid > 0 && u.uid < 1000 && !["sync", "halt", "shutdown"].contains(&u.name.as_str()) {
                 let sev = if ["www-data", "nginx", "apache", "nobody", "mysql", "redis"].contains(&u.name.as_str()) { Severity::High } else { Severity::Low };
-                ctx.add(sev, Category::Persistence, "system_user_shell", format!("Systembenutzer mit Login-Shell: {}", u.name), Some(ctx.p("/etc/passwd")), Some(u.shell.clone()));
+                ctx.add(sev, Category::Persistence, "system_user_shell", format!("System user with login shell: {}", u.name), Some(ctx.p("/etc/passwd")), Some(u.shell.clone()));
             }
         }
     }
@@ -100,18 +100,18 @@ fn ssh_keys(ctx: &mut Ctx, us: &[User]) {
                 continue;
             }
             if f == "authorized_keys2" {
-                ctx.add(Severity::Medium, Category::Persistence, "authorized_keys2", "Veraltete Datei authorized_keys2 (beliebtes Versteck)", Some(p.clone()), None);
+                ctx.add(Severity::Medium, Category::Persistence, "authorized_keys2", "Obsolete authorized_keys2 file (popular hiding place)", Some(p.clone()), None);
             }
             for l in lines.iter().filter(|l| active(l)) {
                 n += 1;
                 match key_fingerprint(l) {
                     Some((t, fp, c)) => {
                         if l.contains("command=") && suspicious_cmd().is_match(l) {
-                            ctx.add(Severity::High, Category::Persistence, "ssh_key_command", "SSH-Key mit verdächtigem command=", Some(p.clone()), Some(fp.clone()));
+                            ctx.add(Severity::High, Category::Persistence, "ssh_key_command", "SSH key with suspicious command=", Some(p.clone()), Some(fp.clone()));
                         }
                         ctx.confirm("ssh_key", p.clone(), format!("{t} {fp} {c}"));
                     }
-                    None => ctx.confirm("ssh_key", p.clone(), format!("nicht lesbare Zeile: {}", l.chars().take(60).collect::<String>())),
+                    None => ctx.confirm("ssh_key", p.clone(), format!("unreadable line: {}", l.chars().take(60).collect::<String>())),
                 }
             }
         }
@@ -136,11 +136,11 @@ fn cron(ctx: &mut Ctx, _us: &[User]) {
         let owned = ctx.pkgs.owns(&rel);
         let script_dir = rel.starts_with("/etc/cron.") && !rel.starts_with("/etc/cron.d");
         let content = std::fs::read_to_string(&f).unwrap_or_default();
-        // unveränderter Paket-Cronjob (z. B. certbot mit „perl -e sleep“) ist kein Befund
+        // an unmodified package cron job (e.g. certbot with "perl -e sleep") is not a finding
         let pristine = owned
             && ctx.pkgs.md5_for(&rel).zip(tyrosd_core::hash::md5_file(&f).ok()).map(|(a, b)| *a == b).unwrap_or(false);
         if !pristine && suspicious_cmd().is_match(&content) {
-            // Beleg mit Zusammenhang: Trefferzeile ± 2 Zeilen (höchstens 6 Zeilen)
+            // evidence with context: matching line ± 2 lines (at most 6 lines)
             let lines: Vec<&str> = content.lines().collect();
             let i = lines.iter().position(|l| suspicious_cmd().is_match(l)).unwrap_or(0);
             let ctx_lines: Vec<String> = lines[i.saturating_sub(2)..(i + 3).min(lines.len())]
@@ -149,26 +149,26 @@ fn cron(ctx: &mut Ctx, _us: &[User]) {
                 .map(|(k, l)| format!("{}{}: {}", if i.saturating_sub(2) + k == i { "→ " } else { "  " }, i.saturating_sub(2) + k + 1, l.chars().take(200).collect::<String>()))
                 .take(6)
                 .collect();
-            // zu einem Paket gehörende Datei (z. B. Konfigurationsdatei eines Hersteller-Repos), Prüfsumme nicht prüfbar:
-            // im Bericht, aber kein Alarm
+            // file belonging to a package (e.g. config file of a vendor repo), checksum not verifiable:
+            // in the report, but no alert
             let sev = if owned { Severity::Medium } else { Severity::High };
-            let owner = if owned { "\n(Datei gehört zu einem installierten Paket)" } else { "" };
-            ctx.add(sev, Category::Persistence, "cron_suspicious", "Cronjob mit verdächtigem Befehl", Some(f.clone()), Some(format!("{}{owner}", ctx_lines.join("\n"))));
+            let owner = if owned { "\n(file belongs to an installed package)" } else { "" };
+            ctx.add(sev, Category::Persistence, "cron_suspicious", "Cron job with suspicious command", Some(f.clone()), Some(format!("{}{owner}", ctx_lines.join("\n"))));
         }
         if script_dir {
             if !owned {
-                ctx.confirm("cron_script", f.clone(), "Cron-Skript ohne Paket");
+                ctx.confirm("cron_script", f.clone(), "Cron script without package");
                 n += 1;
             }
             continue;
         }
         for l in content.lines().filter(|l| active(l)) {
-            // Variablenzuweisungen (MAILTO=, PATH=) überspringen
+            // skip variable assignments (MAILTO=, PATH=)
             if l.split_whitespace().next().map(|w| w.contains('=')).unwrap_or(false) {
                 continue;
             }
             if owned && rel != "/etc/crontab" {
-                continue; // Paket-Cronjob, z. B. /etc/cron.d/php
+                continue; // package cron job, e.g. /etc/cron.d/php
             }
             n += 1;
             ctx.confirm("cron", f.clone(), l.trim().chars().take(200).collect::<String>());
@@ -193,7 +193,7 @@ fn systemd(ctx: &mut Ctx, us: &[User]) {
                 continue;
             }
             if e.file_type().is_symlink() {
-                continue; // Aktivierungs-Links; Ziel wird separat geprüft
+                continue; // activation links; the target is checked separately
             }
             if !seen.insert(p.clone()) {
                 continue;
@@ -202,14 +202,14 @@ fn systemd(ctx: &mut Ctx, us: &[User]) {
             let content = std::fs::read_to_string(&p).unwrap_or_default();
             let exec: Vec<&str> = content.lines().filter(|l| l.trim_start().starts_with("Exec")).collect();
             if exec.iter().any(|l| suspicious_cmd().is_match(l)) {
-                ctx.add(Severity::High, Category::Persistence, "systemd_suspicious", "systemd-Unit mit verdächtigem Befehl", Some(p.clone()),
+                ctx.add(Severity::High, Category::Persistence, "systemd_suspicious", "systemd unit with suspicious command", Some(p.clone()),
                     exec.iter().find(|l| suspicious_cmd().is_match(l)).map(|l| l.chars().take(200).collect()));
             }
             if !ctx.pkgs.owns(&rel) {
                 unknown += 1;
                 let start = exec.first().map(|l| l.trim().to_string()).unwrap_or_default();
                 if exec.iter().any(|l| l.contains("/tmp/") || l.contains("/dev/shm") || l.contains("/var/tmp/")) {
-                    ctx.add(Severity::High, Category::Persistence, "systemd_tmp", "systemd-Unit startet Programm aus temporärem Verzeichnis", Some(p.clone()), Some(start.clone()));
+                    ctx.add(Severity::High, Category::Persistence, "systemd_tmp", "systemd unit starts a program from a temporary directory", Some(p.clone()), Some(start.clone()));
                 }
                 ctx.confirm("systemd_unit", p, start.chars().take(200).collect::<String>());
             }
@@ -223,14 +223,14 @@ fn loader(ctx: &mut Ctx) {
     let content = std::fs::read_to_string(&p).unwrap_or_default();
     let lines: Vec<&str> = content.lines().filter(|l| active(l)).collect();
     if !lines.is_empty() {
-        ctx.add(Severity::Critical, Category::Persistence, "ld_so_preload", "/etc/ld.so.preload ist gesetzt (typisch für Userland-Rootkits)", Some(p), Some(lines.join(" ")));
+        ctx.add(Severity::Critical, Category::Persistence, "ld_so_preload", "/etc/ld.so.preload is set (typical of userland rootkits)", Some(p), Some(lines.join(" ")));
     }
     if let Ok(rd) = std::fs::read_dir(ctx.p("/etc/ld.so.conf.d")) {
         for e in rd.flatten() {
             let fp = e.path().to_string_lossy().into_owned();
             let rel = fp.strip_prefix(ctx.cfg.sysroot.trim_end_matches('/')).unwrap_or(&fp).to_string();
             if !ctx.pkgs.owns(&rel) && ctx.pkgs.available() {
-                ctx.confirm("ld_so_conf", fp, "Bibliothekspfad ohne Paket");
+                ctx.confirm("ld_so_conf", fp, "Library path without package");
             }
         }
     }
@@ -257,12 +257,12 @@ fn pam(ctx: &mut Ctx) {
         let found = candidates.iter().find(|c| std::path::Path::new(&ctx.p(c)).exists()).cloned();
         match found {
             Some(f) if ctx.pkgs.available() && !ctx.pkgs.owns(&f) => {
-                ctx.add(Severity::Critical, Category::Persistence, "pam_module_unowned", "PAM-Modul gehört zu keinem Paket (mögliche Login-Hintertür)", Some(ctx.p(&f)), None);
+                ctx.add(Severity::Critical, Category::Persistence, "pam_module_unowned", "PAM module belongs to no package (possible login backdoor)", Some(ctx.p(&f)), None);
             }
             Some(f) => {
                 if let Some(expected) = ctx.pkgs.md5_for(&f).cloned() {
                     if tyrosd_core::hash::md5_file(&ctx.p(&f)).map(|h| h != expected).unwrap_or(false) {
-                        ctx.add(Severity::Critical, Category::Persistence, "pam_module_modified", "PAM-Modul weicht von Paket-Prüfsumme ab", Some(ctx.p(&f)), None);
+                        ctx.add(Severity::Critical, Category::Persistence, "pam_module_modified", "PAM module differs from package checksum", Some(ctx.p(&f)), None);
                     }
                 }
             }
@@ -278,7 +278,7 @@ fn profiles(ctx: &mut Ctx, us: &[User]) {
             let fp = e.path().to_string_lossy().into_owned();
             let rel = fp.strip_prefix(ctx.cfg.sysroot.trim_end_matches('/')).unwrap_or(&fp).to_string();
             if ctx.pkgs.available() && !ctx.pkgs.owns(&rel) {
-                ctx.confirm("profile_script", fp.clone(), "Login-Skript ohne Paket");
+                ctx.confirm("profile_script", fp.clone(), "Login script without package");
             }
             files.push(fp);
         }
@@ -295,10 +295,10 @@ fn profiles(ctx: &mut Ctx, us: &[User]) {
     for f in files {
         let c = std::fs::read_to_string(&f).unwrap_or_default();
         if let Some(l) = c.lines().filter(|l| active(l)).find(|l| suspicious_cmd().is_match(l) || l.contains("LD_PRELOAD=")) {
-            ctx.add(Severity::High, Category::Persistence, "profile_suspicious", "Verdächtiger Befehl in Shell-Profil", Some(f.clone()), Some(l.chars().take(200).collect()));
+            ctx.add(Severity::High, Category::Persistence, "profile_suspicious", "Suspicious command in shell profile", Some(f.clone()), Some(l.chars().take(200).collect()));
         }
         if f.ends_with("/etc/rc.local") && c.lines().any(|l| active(l) && l.trim() != "exit 0" && !l.starts_with("#!")) {
-            ctx.confirm("rc_local", f.clone(), "rc.local enthält Befehle");
+            ctx.confirm("rc_local", f.clone(), "rc.local contains commands");
         }
     }
 }
@@ -324,13 +324,13 @@ fn sudoers(ctx: &mut Ctx) {
 
 fn modules(ctx: &mut Ctx) {
     if ctx.cfg.sysroot != "/" {
-        return; // Laufzeit-Prüfung nur auf dem laufenden System
+        return; // runtime check only on the live system
     }
     let rel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default().trim().to_string();
     let dep = std::fs::read_to_string(format!("/lib/modules/{rel}/modules.dep")).unwrap_or_default();
     let builtin = std::fs::read_to_string(format!("/lib/modules/{rel}/modules.builtin")).unwrap_or_default();
     if dep.is_empty() {
-        ctx.report.notes.push("Kernel-Module nicht geprüft (modules.dep fehlt, z. B. im Container)".into());
+        ctx.report.notes.push("Kernel modules not checked (modules.dep missing, e.g. in a container)".into());
         return;
     }
     let norm = |s: &str| -> String {
@@ -344,7 +344,7 @@ fn modules(ctx: &mut Ctx) {
         let name = l.split_whitespace().next().unwrap_or("");
         let tainted = l.contains("(O") || l.contains("(OE") || l.contains("(E");
         if !known.contains(name) {
-            ctx.add(Severity::High, Category::Persistence, "kmod_unknown", format!("Geladenes Kernel-Modul ohne Datei im Modulverzeichnis: {name}"), None, Some(l.chars().take(160).collect()));
+            ctx.add(Severity::High, Category::Persistence, "kmod_unknown", format!("Loaded kernel module without a file in the module directory: {name}"), None, Some(l.chars().take(160).collect()));
         } else if tainted {
             ctx.confirm("kmod_out_of_tree", "/proc/modules", name.to_string());
         }
@@ -356,7 +356,7 @@ mod tests {
     use super::*;
     #[test]
     fn fingerprint() {
-        // Beispiel-Key (öffentlich, nur Test)
+        // example key (public, test only)
         let l = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHxhUwXi7CwcgL7Y0MQkKM6dTj8mGhPZJXH5R0Ws0f9J test@host";
         let (t, fp, c) = key_fingerprint(l).unwrap();
         assert_eq!(t, "ssh-ed25519");

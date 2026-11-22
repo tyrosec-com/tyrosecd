@@ -1,4 +1,4 @@
-//! Prozessangaben aus /proc (nur lesen).
+//! Process information from /proc (read only).
 
 pub struct Info {
     pub pid: u32,
@@ -20,7 +20,7 @@ pub fn info(pid: u32) -> Option<Info> {
     Some(Info { pid, ppid, comm, exe, cmdline: cmdline.chars().take(2000).collect() })
 }
 
-/// Namen der Prozesskette: [Prozess, Eltern, Großeltern, …]
+/// Names of the process chain: [process, parent, grandparent, …]
 pub fn chain(pid: u32, depth: usize) -> Vec<String> {
     let mut out = Vec::new();
     let mut cur = pid;

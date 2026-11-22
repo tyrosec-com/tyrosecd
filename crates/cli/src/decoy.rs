@@ -1,16 +1,16 @@
-//! Köder-Zugangsdaten.
+//! Decoy credentials.
 //!
-//! Die Zentrale schickt nur **Werte** (Benutzer, Passwort, geheime Adresse) – den Datei-Inhalt baut der Agent selbst
-//! aus festen Vorlagen. Eine übernommene Zentrale kann so keinen Code (z. B. PHP) in einen Webroot schreiben:
-//! - nur **neue** Dateien (O_CREAT|O_EXCL|O_NOFOLLOW), nie überschreiben,
-//! - nur in erkannten Webroots, nie in Systembereichen (Sperrliste wie Wiederherstellen),
-//! - Dateiname nach Vorgabe, nie mit ausführbaren Endungen (.php, .phtml, .phar, .cgi, .sh, .htaccess …) – auch nicht
-//!   als Zwischenendung („x.php.bak“ würde Apache mit AddHandler ausführen),
-//! - Werte streng geprüft (Benutzer/Passwort nur Buchstaben/Ziffern, Adresse nur https?://host/pfad), höchstens 4 KB,
-//! - Rechte 0640, Eigentümer wie der Ordner; Entfernen nur für Dateien, die der Agent selbst als Köder angelegt hat.
+//! The central server sends only **values** (user, password, secret address) – the agent builds the file content
+//! itself from fixed templates. A compromised central server therefore cannot write code (e.g. PHP) into a webroot:
+//! - only **new** files (O_CREAT|O_EXCL|O_NOFOLLOW), never overwrite,
+//! - only in detected webroots, never in system areas (same block list as restore),
+//! - file name as specified, never with executable extensions (.php, .phtml, .phar, .cgi, .sh, .htaccess …) – not
+//!   even as an intermediate extension ("x.php.bak" would be executed by Apache with AddHandler),
+//! - values strictly validated (user/password letters/digits only, address only https?://host/path), at most 4 KB,
+//! - mode 0640, owner same as the folder; removal only for files the agent itself created as decoys.
 //!
-//! Erkennung: Öffnen der Datei (fanotify, `DecoyWatch`), Aufruf der geheimen Adresse (Access-Log, `source-weblog`),
-//! SSH-Anmeldeversuch mit dem Köder-Benutzer (Zentrale gleicht Anmeldungen ab).
+//! Detection: opening the file (fanotify, `DecoyWatch`), request to the secret address (access log, `source-weblog`),
+//! SSH login attempt with the decoy user (the central server matches logins).
 use std::io::Write;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -33,7 +33,7 @@ pub struct Service {
     pub url: String,
     pub user: String,
     pub password: String,
-    /// Datenbank: Port und Name (Phase 2)
+    /// Database: port and name (phase 2)
     #[serde(default)]
     pub port: u16,
     #[serde(default)]
@@ -53,19 +53,19 @@ pub struct Entry {
     pub id: u64,
     pub path: String,
     pub sha256: String,
-    /// geheime Adressen (Pfadteil) für die Access-Log-Erkennung
+    /// secret addresses (path part) for access-log detection
     #[serde(default)]
     pub url_paths: Vec<String>,
 }
 
 const MAX_SIZE: usize = 4096;
 const MAX_DECOYS: usize = 50;
-/// Endungen/Namensteile, die ein Webserver ausführen oder als Konfiguration lesen könnte – nie im Dateinamen
+/// Extensions/name parts that a web server could execute or read as configuration – never in the file name
 const FORBIDDEN_PARTS: &[&str] = &[
     "php", "phtml", "phar", "php3", "php4", "php5", "php7", "php8", "pht", "phps", "cgi", "pl", "py", "sh", "bash", "rb", "js", "mjs", "html",
     "htm", "shtml", "xhtml", "asp", "aspx", "jsp", "jspx", "svg", "htaccess", "htpasswd", "user", "ini", "so", "exe",
 ];
-/// erlaubte letzte Endungen (Sicherungs-/Notizdateien)
+/// allowed last extensions (backup/note files)
 const ALLOWED_ENDINGS: &[&str] = &["bak", "old", "backup", "txt", "save", "orig", "copy", "env"];
 
 static WATCH: OnceLock<Arc<tyrosd_source_fanotify::decoy::DecoyWatch>> = OnceLock::new();
@@ -82,11 +82,11 @@ pub fn load(data_dir: &str) -> Vec<Entry> {
 fn save(data_dir: &str, list: &[Entry]) -> Result<(), String> {
     let p = registry_path(data_dir);
     let tmp = format!("{p}.tmp");
-    std::fs::write(&tmp, serde_json::to_vec_pretty(list).unwrap_or_default()).map_err(|e| format!("Köder-Verzeichnis: {e}"))?;
-    std::fs::rename(&tmp, &p).map_err(|e| format!("Köder-Verzeichnis: {e}"))
+    std::fs::write(&tmp, serde_json::to_vec_pretty(list).unwrap_or_default()).map_err(|e| format!("Decoy registry: {e}"))?;
+    std::fs::rename(&tmp, &p).map_err(|e| format!("Decoy registry: {e}"))
 }
 
-/// Erkennung auf den aktuellen Stand bringen: geheime Adressen/Dateinamen an die Access-Log-Auswertung, Dateien beobachten
+/// Bring detection up to date: secret addresses/file names to the access-log analysis, watch files
 pub fn apply(data_dir: &str) {
     let list = load(data_dir);
     let mut web = Vec::new();
@@ -106,7 +106,7 @@ pub fn apply(data_dir: &str) {
     tyrosd_source_weblog::set_decoys(web);
 }
 
-/// Beobachtung der Köder-Dateien starten (einmal beim Start des Agenten); `emit(id, pfad, pid)` je Öffnen
+/// Start watching the decoy files (once at agent startup); `emit(id, path, pid)` per open
 pub fn start_watch(data_dir: &str, emit: impl Fn(u64, String, i32) + Send + 'static) -> Result<(), String> {
     let w = Arc::new(tyrosd_source_fanotify::decoy::DecoyWatch::new().map_err(|e| format!("{e:#}"))?);
     let _ = WATCH.set(w.clone());
@@ -124,9 +124,9 @@ pub fn start_watch(data_dir: &str, emit: impl Fn(u64, String, i32) + Send + 'sta
     Ok(())
 }
 
-/// Webroots für Köder (und die Schreibfreigabe): Standard-Orte plus `root`/`DocumentRoot` aus der Webserver-
-/// Konfiguration (z. B. /users/www/app/public), nur vorhandene Ordner außerhalb von Systembereichen,
-/// verschachtelte zusammengefasst
+/// Webroots for decoys (and the write permission): default locations plus `root`/`DocumentRoot` from the web server
+/// configuration (e.g. /users/www/app/public), only existing folders outside system areas,
+/// nested ones merged
 pub fn webroots() -> Vec<String> {
     let mut v: Vec<String> = tyrosd_check::default_webroots("/");
     v.extend(tyrosd_source_weblog::docroots().into_iter().map(|(root, _)| root));
@@ -151,7 +151,7 @@ fn ok_host(s: &str) -> bool {
     (1..=253).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
 }
 
-/// geheime Adresse: http(s)://host[:port]/pfad – Pfad nur [A-Za-z0-9/_.-], mit mindestens 6 Zeichen Zufall im Pfad
+/// secret address: http(s)://host[:port]/path – path only [A-Za-z0-9/_.-], with at least 6 random characters in the path
 pub fn url_path(url: &str) -> Option<String> {
     let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://"))?;
     let (host, path) = rest.split_once('/')?;
@@ -166,7 +166,7 @@ pub fn url_path(url: &str) -> Option<String> {
     ok.then_some(path)
 }
 
-/// Dateiname: Buchstaben/Ziffern/._-, nie mit ausführbaren Teilen, letzte Endung aus der Erlaubtliste
+/// File name: letters/digits/._-, never with executable parts, last extension from the allow list
 pub fn ok_file_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 64 || name.starts_with("..") || !name.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')) {
         return false;
@@ -187,33 +187,33 @@ pub fn ok_file_name(name: &str) -> bool {
 
 fn valid_service(s: &Service) -> Result<(), String> {
     if !ok_value(&s.user, 3, 40) || !ok_value(&s.password, 12, 64) {
-        return Err("Köder-Werte ungültig (Benutzer/Passwort)".into());
+        return Err("Decoy values invalid (user/password)".into());
     }
     match s.kind.as_str() {
         "ssh" => {
             if !ok_host(&s.host) {
-                return Err("Köder-Werte ungültig (Host)".into());
+                return Err("Decoy values invalid (host)".into());
             }
         }
         "web" => {
             if !matches!(s.flavor.as_str(), "wordpress" | "shopware" | "generic") || url_path(&s.url).is_none() {
-                return Err("Köder-Werte ungültig (Adresse)".into());
+                return Err("Decoy values invalid (address)".into());
             }
         }
         "postgresql" | "mysql" => {
             if !ok_host(&s.host) || s.port == 0 || !ok_value(&s.db, 1, 40) {
-                return Err("Köder-Werte ungültig (Datenbank)".into());
+                return Err("Decoy values invalid (database)".into());
             }
         }
-        k => return Err(format!("unbekannte Köder-Art {k}")),
+        k => return Err(format!("unknown decoy type {k}")),
     }
     Ok(())
 }
 
-/// Datei-Inhalt aus festen Vorlagen (Bezeichnungen englisch – wirkt auf jedem Server natürlich)
+/// File content from fixed templates (labels in English – looks natural on any server)
 pub fn render(format: &str, services: &[Service]) -> Result<String, String> {
     if services.is_empty() || services.len() > 6 {
-        return Err("Köder ohne Dienste".into());
+        return Err("Decoy without services".into());
     }
     for s in services {
         valid_service(s)?;
@@ -223,7 +223,7 @@ pub fn render(format: &str, services: &[Service]) -> Result<String, String> {
         "env" => {
             out.push_str("# credentials backup – do not commit\n");
             for s in services {
-                // Datenbanken: übliche Variablennamen (libpq bzw. Docker-Images)
+                // Databases: common variable names (libpq or Docker images)
                 if s.kind == "postgresql" {
                     out.push_str(&format!("\nPGHOST={}\nPGPORT={}\nPGDATABASE={}\nPGUSER={}\nPGPASSWORD={}\n", s.host, s.port, s.db, s.user, s.password));
                     continue;
@@ -270,71 +270,71 @@ pub fn render(format: &str, services: &[Service]) -> Result<String, String> {
                 out.push_str(&format!("  User:     {}\n  Password: {}\n", s.user, s.password));
             }
         }
-        f => return Err(format!("unbekanntes Format {f}")),
+        f => return Err(format!("unknown format {f}")),
     }
     if out.len() > MAX_SIZE {
-        return Err("Köder-Datei zu groß".into());
+        return Err("Decoy file too large".into());
     }
     Ok(out)
 }
 
 fn cstr(s: &str) -> Result<std::ffi::CString, String> {
-    std::ffi::CString::new(s).map_err(|_| "ungültiger Pfad".to_string())
+    std::ffi::CString::new(s).map_err(|_| "invalid path".to_string())
 }
 
-/// Köder anlegen (Aktion `decoy_place`): Pfad in `a.path`, Werte in `a.params`
+/// Place a decoy (action `decoy_place`): path in `a.path`, values in `a.params`
 pub fn place(a: &pb::Action, data_dir: &str, webroots: &[String]) -> Result<String, String> {
-    let p: PlaceParams = serde_json::from_str(&a.params).map_err(|_| "Köder-Parameter unlesbar".to_string())?;
+    let p: PlaceParams = serde_json::from_str(&a.params).map_err(|_| "Decoy parameters unreadable".to_string())?;
     let content = render(&p.format, &p.services)?;
     let (dir, name, resolved) = crate::actions::resolve_pub(&a.path)?;
     if resolved != a.path {
-        return Err(format!("Pfad enthält symbolische Links (aufgelöst: {resolved})"));
+        return Err(format!("Path contains symbolic links (resolved: {resolved})"));
     }
     if !ok_file_name(&name) {
-        return Err(format!("Dateiname „{name}“ ist für Köder nicht erlaubt"));
+        return Err(format!("File name “{name}” is not allowed for decoys"));
     }
     if !webroots.iter().any(|w| resolved.starts_with(&format!("{}/", w.trim_end_matches('/')))) {
-        return Err("Köder nur innerhalb eines erkannten Webroots".into());
+        return Err("Decoys only inside a detected web root".into());
     }
     let _g = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut list = load(data_dir);
     if list.len() >= MAX_DECOYS {
-        return Err("zu viele Köder auf diesem Server".into());
+        return Err("too many decoys on this server".into());
     }
     if list.iter().any(|e| e.id == p.id || e.path == resolved) {
-        return Err("Köder existiert bereits".into());
+        return Err("Decoy already exists".into());
     }
     let ds = {
         let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        // SAFETY: Zeiger gültig
+        // SAFETY: pointer valid
         if unsafe { libc::fstat(dir.as_raw_fd(), &mut st) } != 0 {
-            return Err("Ordner nicht prüfbar".into());
+            return Err("Folder cannot be checked".into());
         }
         st
     };
     let cname = cstr(&name)?;
-    // SAFETY: dir und cname gültig; O_EXCL: nie eine vorhandene Datei überschreiben
+    // SAFETY: dir and cname valid; O_EXCL: never overwrite an existing file
     let raw = unsafe {
         libc::openat(dir.as_raw_fd(), cname.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, 0o640 as libc::c_uint)
     };
     if raw < 0 {
         let e = std::io::Error::last_os_error();
-        return Err(if e.raw_os_error() == Some(libc::EEXIST) { "Datei existiert bereits – Köder nicht angelegt".into() } else { format!("Köder anlegen: {e}") });
+        return Err(if e.raw_os_error() == Some(libc::EEXIST) { "File already exists – decoy not created".into() } else { format!("Creating decoy: {e}") });
     }
-    // SAFETY: frischer fd
+    // SAFETY: fresh fd
     let fd = unsafe { OwnedFd::from_raw_fd(raw) };
     let mut f = std::fs::File::from(fd);
     let written = f.write_all(content.as_bytes()).and_then(|_| f.sync_all());
-    // Eigentümer wie der Ordner (z. B. www-data), damit die Datei unauffällig wirkt
-    // SAFETY: fd gültig
+    // Owner same as the folder (e.g. www-data), so the file looks inconspicuous
+    // SAFETY: fd valid
     unsafe {
         libc::fchown(f.as_raw_fd(), ds.st_uid, ds.st_gid);
         libc::fchmod(f.as_raw_fd(), 0o640);
     }
     if let Err(e) = written {
-        // SAFETY: dir und cname gültig
+        // SAFETY: dir and cname valid
         unsafe { libc::unlinkat(dir.as_raw_fd(), cname.as_ptr(), 0) };
-        return Err(format!("Köder schreiben: {e}"));
+        return Err(format!("Writing decoy: {e}"));
     }
     let sha: String = Sha256::digest(content.as_bytes()).iter().map(|b| format!("{b:02x}")).collect();
     let url_paths = p.services.iter().filter_map(|s| url_path(&s.url)).collect();
@@ -342,39 +342,39 @@ pub fn place(a: &pb::Action, data_dir: &str, webroots: &[String]) -> Result<Stri
     save(data_dir, &list)?;
     drop(_g);
     apply(data_dir);
-    Ok(format!("Köder angelegt: {resolved} (SHA-256 {})", &sha[..16]))
+    Ok(format!("Decoy created: {resolved} (SHA-256 {})", &sha[..16]))
 }
 
-/// Köder entfernen (Aktion `decoy_remove`): nur Dateien, die der Agent selbst als Köder angelegt hat
+/// Remove a decoy (action `decoy_remove`): only files the agent itself created as decoys
 pub fn remove(a: &pb::Action, data_dir: &str) -> Result<String, String> {
     #[derive(Deserialize)]
     struct P {
         id: u64,
     }
-    let p: P = serde_json::from_str(&a.params).map_err(|_| "Köder-Parameter unlesbar".to_string())?;
+    let p: P = serde_json::from_str(&a.params).map_err(|_| "Decoy parameters unreadable".to_string())?;
     let _g = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let mut list = load(data_dir);
     let Some(pos) = list.iter().position(|e| e.id == p.id) else {
-        return Ok("Köder war nicht (mehr) vorhanden".into());
+        return Ok("Decoy was not present (anymore)".into());
     };
     let e = list[pos].clone();
     let msg = match crate::actions::resolve_pub(&e.path) {
         Ok((dir, name, resolved)) if resolved == e.path => {
             let cname = cstr(&name)?;
             let mut st: libc::stat = unsafe { std::mem::zeroed() };
-            // SAFETY: Zeiger gültig
+            // SAFETY: pointer valid
             let exists = unsafe { libc::fstatat(dir.as_raw_fd(), cname.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } == 0;
             if exists && st.st_mode & libc::S_IFMT == libc::S_IFREG {
-                // SAFETY: dir und cname gültig
+                // SAFETY: dir and cname valid
                 if unsafe { libc::unlinkat(dir.as_raw_fd(), cname.as_ptr(), 0) } != 0 {
-                    return Err(format!("Köder entfernen: {}", std::io::Error::last_os_error()));
+                    return Err(format!("Removing decoy: {}", std::io::Error::last_os_error()));
                 }
-                format!("Köder entfernt: {}", e.path)
+                format!("Decoy removed: {}", e.path)
             } else {
-                format!("Köder-Datei fehlte bereits: {}", e.path)
+                format!("Decoy file was already missing: {}", e.path)
             }
         }
-        _ => format!("Köder-Datei nicht mehr sicher erreichbar, nur aus dem Verzeichnis entfernt: {}", e.path),
+        _ => format!("Decoy file no longer safely reachable, only removed from the registry: {}", e.path),
     };
     list.remove(pos);
     save(data_dir, &list)?;
@@ -383,7 +383,7 @@ pub fn remove(a: &pb::Action, data_dir: &str) -> Result<String, String> {
     Ok(msg)
 }
 
-/// Programme, die Dateien routinemäßig lesen (Sicherung, Virenscanner) – Öffnen nur als Hinweis
+/// Programs that routinely read files (backup, virus scanners) – opening only as a notice
 pub fn routine_reader(comm: &str) -> bool {
     const R: &[&str] = &[
         "rsync", "borg", "restic", "tar", "gzip", "zstd", "duplicity", "rclone", "rdiff-backup", "bacula-fd", "bareos-fd", "duply", "kopia",
@@ -398,7 +398,7 @@ mod tests {
     use super::*;
 
     fn web(url: &str) -> Service {
-        Service { kind: "web".into(), flavor: "wordpress".into(), host: String::new(), url: url.into(), user: "wpadmin_x7f3".into(), password: "Kq7vX2mP9sLr4tWz".into(), port: 0, db: String::new() } // guard:ok Testdaten
+        Service { kind: "web".into(), flavor: "wordpress".into(), host: String::new(), url: url.into(), user: "wpadmin_x7f3".into(), password: "Kq7vX2mP9sLr4tWz".into(), port: 0, db: String::new() } // guard:ok test data
     }
 
     #[test]
@@ -415,7 +415,7 @@ mod tests {
     fn values_and_urls() {
         assert_eq!(url_path("https://shop.example/admin-backup-7f3a9c/").as_deref(), Some("/admin-backup-7f3a9c/"));
         assert!(url_path("https://shop.example/<script>").is_none());
-        assert!(url_path("https://shop.example/a").is_none()); // zu kurz
+        assert!(url_path("https://shop.example/a").is_none()); // too short
         assert!(url_path("javascript:alert(1)").is_none());
         assert!(render("env", &[Service { password: "kurz".into(), ..web("https://s.example/admin-backup-7f3a9c/") }]).is_err());
         assert!(render("env", &[Service { user: "x\n<?php".into(), ..web("https://s.example/admin-backup-7f3a9c/") }]).is_err());
@@ -424,7 +424,7 @@ mod tests {
     #[test]
     fn templates_contain_values_and_no_code() {
         let s = vec![
-            Service { kind: "ssh".into(), flavor: String::new(), host: "203.0.113.5".into(), url: String::new(), user: "svc_backup_x7f3".into(), password: "Tq8wN3vB6yHc2kLp".into(), port: 0, db: String::new() }, // guard:ok Testdaten
+            Service { kind: "ssh".into(), flavor: String::new(), host: "203.0.113.5".into(), url: String::new(), user: "svc_backup_x7f3".into(), password: "Tq8wN3vB6yHc2kLp".into(), port: 0, db: String::new() }, // guard:ok test data
             web("https://shop.example/admin-backup-7f3a9c/"),
         ];
         let env = render("env", &s).unwrap();
@@ -437,8 +437,8 @@ mod tests {
     #[test]
     fn database_templates() {
         let s = vec![
-            Service { kind: "postgresql".into(), flavor: String::new(), host: "127.0.0.1".into(), url: String::new(), user: "report_ro_x7f3".into(), password: "Tq8wN3vB6yHc2kLp".into(), port: 5432, db: "shop_backup".into() }, // guard:ok Testdaten
-            Service { kind: "mysql".into(), flavor: String::new(), host: "127.0.0.1".into(), url: String::new(), user: "backup_x7f3".into(), password: "Kq7vX2mP9sLr4tWz".into(), port: 3306, db: "shop".into() }, // guard:ok Testdaten
+            Service { kind: "postgresql".into(), flavor: String::new(), host: "127.0.0.1".into(), url: String::new(), user: "report_ro_x7f3".into(), password: "Tq8wN3vB6yHc2kLp".into(), port: 5432, db: "shop_backup".into() }, // guard:ok test data
+            Service { kind: "mysql".into(), flavor: String::new(), host: "127.0.0.1".into(), url: String::new(), user: "backup_x7f3".into(), password: "Kq7vX2mP9sLr4tWz".into(), port: 3306, db: "shop".into() }, // guard:ok test data
         ];
         let env = render("env", &s).unwrap();
         assert!(env.contains("PGUSER=report_ro_x7f3\nPGPASSWORD=Tq8wN3vB6yHc2kLp") && env.contains("MYSQL_DATABASE=shop\nMYSQL_USER=backup_x7f3"));

@@ -1,4 +1,4 @@
-//! Versand-Thread (Spool → Zentrale) und Heartbeat-Thread.
+//! Sender thread (spool → central server) and heartbeat thread.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -32,7 +32,7 @@ fn log(m: impl AsRef<str>) {
 }
 
 impl Sender {
-    /// Läuft, bis `stop` gesetzt ist und der Spool leer ist (oder 10 s vergangen sind).
+    /// Runs until `stop` is set and the spool is empty (or 10 s have passed).
     pub fn run(self, stop: Arc<AtomicBool>) {
         let mut backoff = 1u64;
         let mut last_err = String::new();
@@ -49,7 +49,7 @@ impl Sender {
             let items = match self.spool.peek(500, 4 * 1024 * 1024) {
                 Ok(v) => v,
                 Err(e) => {
-                    log(format!("Spool lesen: {e:#}"));
+                    log(format!("reading spool: {e:#}"));
                     std::thread::sleep(Duration::from_secs(5));
                     continue;
                 }
@@ -64,7 +64,7 @@ impl Sender {
             match self.client.post("/v1/batch", &body, true).and_then(|r| Ok(pb::BatchAck::decode(r.as_slice())?)) {
                 Ok(ack) => {
                     if !last_err.is_empty() {
-                        log("Verbindung zur Zentrale wieder ok");
+                        log("connection to the central service OK again");
                         last_err.clear();
                     }
                     backoff = 1;
@@ -82,7 +82,7 @@ impl Sender {
                     self.stats.errors.fetch_add(1, Ordering::Relaxed);
                     let msg = format!("{e:#}");
                     if msg != last_err {
-                        log(format!("Versand fehlgeschlagen (Spool puffert): {msg}"));
+                        log(format!("sending failed (spool is buffering): {msg}"));
                         last_err = msg;
                     }
                     std::thread::sleep(Duration::from_secs(backoff));
@@ -92,9 +92,9 @@ impl Sender {
         }
     }
 
-    /// Zentrale fehlt die Basis eines Pfads → vollen gespeicherten Inhalt senden.
-    /// Nur Pfade, die der Agent ohnehin überwacht (Zustand vorhanden) – keine
-    /// beliebigen Dateien auf Anforderung (Hauptplan 10).
+    /// The central server is missing the base of a path → send the full stored content.
+    /// Only paths the agent monitors anyway (state present) – no
+    /// arbitrary files on request (main plan 10).
     fn resync(&self, path: &str) {
         self.stats.resyncs.fetch_add(1, Ordering::Relaxed);
         let entry = self.state.get(path);
@@ -122,12 +122,12 @@ fn rss_kb() -> u64 {
         .unwrap_or(0)
 }
 
-/// Heartbeat alle `interval` Sekunden (nicht über den Spool: „lebt jetzt“).
+/// Heartbeat every `interval` seconds (not via the spool: "alive now").
 pub fn heartbeat_loop(
     client: Client,
     spool: Arc<Spool>,
-    // gemeinsam, weil der Heartbeat schon vor dem Einrichten der Überwachung läuft (große Server brauchen dafür
-    // Minuten) – der Name des Backends wird nachgetragen
+    // shared, because the heartbeat already runs before monitoring is set up (large servers need
+    // minutes for that) – the backend name is filled in later
     backend: Arc<std::sync::RwLock<String>>,
     stop: Arc<AtomicBool>,
     interval: Duration,

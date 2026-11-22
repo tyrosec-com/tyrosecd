@@ -1,6 +1,6 @@
-//! Programme und Laufzeit: SUID/SGID, File-Capabilities, ausführbare Dateien
-//! in temporären Verzeichnissen, Binaries gegen lokale Paket-DB, Prozesse
-//! (gelöschtes Binary, /tmp, memfd, falsche Kernel-Threads), offene Ports.
+//! Programs and runtime: SUID/SGID, file capabilities, executable files
+//! in temporary directories, binaries against the local package DB, processes
+//! (deleted binary, /tmp, memfd, fake kernel threads), open ports.
 
 use std::collections::HashMap;
 use std::os::unix::fs::MetadataExt;
@@ -20,9 +20,10 @@ pub fn check(ctx: &mut Ctx) {
     }
 }
 
-/// chroot-/Build-Umgebungen: Ordner mit vollständigem System und eigener Paketdatenbank (z. B. /srv/php-build/focal,
-/// debootstrap-Ziele, schroot). Sie werden wie Container mit ihrer eigenen Paketdatenbank geprüft – SUID-Programme
-/// darin gehören nicht zum Server selbst (Praxisfall: 15 Fehlalarme „SUID ohne Paket“ auf einem Entwickler-Rechner).
+/// chroot/build environments: directories with a complete system and their own package database
+/// (e.g. /srv/php-build/focal, debootstrap targets, schroot). They are checked like containers with their own
+/// package database – SUID programs in them do not belong to the server itself (real case: 15 false alarms
+/// "SUID without package" on a developer machine).
 fn chroot_roots(ctx: &Ctx) -> Vec<String> {
     let looks_like_rootfs = |p: &std::path::Path| {
         p.join("etc/os-release").is_file()
@@ -41,7 +42,7 @@ fn chroot_roots(ctx: &Ctx) -> Vec<String> {
                 out.push(p.to_string_lossy().into_owned());
                 continue;
             }
-            // eine Ebene tiefer (z. B. /srv/php-build/focal)
+            // one level deeper (e.g. /srv/php-build/focal)
             if let Ok(rd2) = std::fs::read_dir(&p) {
                 for e2 in rd2.flatten().take(50) {
                     if e2.file_type().is_ok_and(|t| t.is_dir()) && looks_like_rootfs(&e2.path()) {
@@ -59,15 +60,15 @@ fn rel(ctx: &Ctx, p: &str) -> String {
     p.strip_prefix(ctx.cfg.sysroot.trim_end_matches('/')).unwrap_or(p).to_string()
 }
 
-/// SUID/SGID in Containern gegen die Paketdatenbank **des Containers** prüfen (nspawn, LXC/LXD/Incus und laufende
-/// Container über /proc/<pid>/root). Volle Systeme (nspawn/LXC) → hoch; Docker/Podman-Images (oft Programme außerhalb
-/// der Paketverwaltung) → mittel, also nur im Bericht.
+/// Check SUID/SGID in containers against the package database **of the container** (nspawn, LXC/LXD/Incus and running
+/// containers via /proc/<pid>/root). Full systems (nspawn/LXC) → high; Docker/Podman images (often programs outside
+/// package management) → medium, i.e. report only.
 fn container_suid(ctx: &mut Ctx) {
     if ctx.cfg.skip_suid_scan {
         return;
     }
     use std::os::unix::fs::MetadataExt;
-    let mut roots: Vec<(String, String, bool)> = Vec::new(); // (Wurzel, Bezeichnung, volles System)
+    let mut roots: Vec<(String, String, bool)> = Vec::new(); // (root, label, full system)
     let mut seen = std::collections::HashSet::new();
     let host = std::fs::metadata(ctx.p("/")).map(|m| (m.dev(), m.ino())).unwrap_or((0, 0));
     let mut push = |root: String, label: String, full: bool, roots: &mut Vec<(String, String, bool)>| {
@@ -93,7 +94,8 @@ fn container_suid(ctx: &mut Ctx) {
             }
         }
     }
-    // laufende Container ohne festen Ablageort (Docker, Podman) – nur im echten System, nicht im Test-Sysroot
+    // running containers without a fixed storage location (Docker, Podman) – only on the real system,
+    // not in the test sysroot
     if ctx.cfg.sysroot.trim_end_matches('/').is_empty() {
         if let Ok(rd) = std::fs::read_dir("/proc") {
             for e in rd.flatten() {
@@ -107,17 +109,18 @@ fn container_suid(ctx: &mut Ctx) {
         }
     }
     for (root, label, full) in roots {
-        // Paketdatenbank des Containers nur über openat2 (Symlinks bleiben in der Wurzel, nur reguläre Dateien, Grenzen);
-        // ohne openat2 (Kernel < 5.6) wird der Container übersprungen statt unsicher gelesen
+        // the container's package database only via openat2 (symlinks stay inside the root, regular files only,
+        // limits); without openat2 (kernel < 5.6) the container is skipped instead of being read unsafely
         let Ok(fs) = tyrosd_core::rootfs::FsRoot::contained(&root) else { continue };
         let db = crate::pkg::PackageDb::load_in(&fs);
-        if db.kind == "keine" {
-            continue; // ohne Paketdatenbank nicht beurteilbar
+        if db.kind == "none" {
+            continue; // cannot be assessed without a package database
         }
         let mut n = 0;
         for sub in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/home", "/root", "/srv", "/var", "/tmp", "/etc"] {
             let start = format!("{root}{sub}");
-            // follow_root_links(false): ein Symlink /usr → / im Container zeigte sonst (über /proc/<pid>/root) auf den Host
+            // follow_root_links(false): otherwise a symlink /usr → / in the container would point
+            // (via /proc/<pid>/root) to the host
             let mut it = walkdir::WalkDir::new(&start).follow_links(false).follow_root_links(false).same_file_system(true).into_iter();
             while let Some(entry) = it.next() {
                 let Ok(e) = entry else { continue };
@@ -140,8 +143,8 @@ fn container_suid(ctx: &mut Ctx) {
                 let in_tmp = TMP_DIRS.iter().any(|t| inner.starts_with(&format!("{t}/"))) || inner.starts_with("/home/") || inner.starts_with("/var/www/");
                 let sev = if in_tmp { Severity::Critical } else if full { Severity::High } else { Severity::Medium };
                 let what = if m.mode() & 0o4000 != 0 { "SUID" } else { "SGID" };
-                ctx.add(sev, Category::Binaries, "suid_unowned", format!("{what}-Programm ohne Paket im Container {label}"), Some(p.clone()),
-                    Some(format!("Modus {:o}, Besitzer uid {} · im Container: {inner} · Paketverwaltung des Containers: {}", m.mode() & 0o7777, m.uid(), db.kind)));
+                ctx.add(sev, Category::Binaries, "suid_unowned", format!("{what} program without package in container {label}"), Some(p.clone()),
+                    Some(format!("Mode {:o}, owner uid {} · in the container: {inner} · container package manager: {}", m.mode() & 0o7777, m.uid(), db.kind)));
             }
         }
     }
@@ -162,7 +165,7 @@ fn suid_caps(ctx: &mut Ctx) {
             let Ok(e) = entry else { continue };
             if e.file_type().is_dir() {
                 let p = e.path().to_string_lossy();
-                // Container-Dateisysteme (eigene Paketverwaltung) gehören nicht zum Server selbst
+                // container file systems (own package management) do not belong to the server itself
                 if ["/var/lib/docker", "/var/lib/containerd", "/var/log", "/proc", "/var/lib/machines", "/var/lib/lxc", "/var/lib/lxd", "/var/snap/lxd",
                     "/var/lib/incus", "/var/lib/containers", "/var/lib/libvirt/images"].iter().any(|d| p.ends_with(d))
                     || chroots.iter().any(|c| *c == p)
@@ -183,14 +186,14 @@ fn suid_caps(ctx: &mut Ctx) {
                 if !ctx.pkgs.owns(&r) {
                     let sev = if in_tmp { Severity::Critical } else { Severity::High };
                     let what = if m.mode() & 0o4000 != 0 { "SUID" } else { "SGID" };
-                    ctx.add(sev, Category::Binaries, "suid_unowned", format!("{what}-Programm ohne Paket"), Some(p.clone()), Some(format!("Modus {:o}, Besitzer uid {}", m.mode() & 0o7777, m.uid())));
+                    ctx.add(sev, Category::Binaries, "suid_unowned", format!("{what} program without package"), Some(p.clone()), Some(format!("Mode {:o}, owner uid {}", m.mode() & 0o7777, m.uid())));
                 }
             }
             if m.mode() & 0o111 != 0 || m.len() > 0 {
                 if let Some(caps) = tyrosd_core::event::read_caps(&p) {
                     n_caps += 1;
                     if !ctx.pkgs.owns(&r) {
-                        ctx.add(Severity::High, Category::Binaries, "caps_unowned", "Programm mit File-Capabilities ohne Paket", Some(p.clone()), Some(format!("security.capability={caps}")));
+                        ctx.add(Severity::High, Category::Binaries, "caps_unowned", "Program with file capabilities without package", Some(p.clone()), Some(format!("security.capability={caps}")));
                     } else {
                         ctx.confirm("file_caps", p.clone(), caps);
                     }
@@ -202,9 +205,9 @@ fn suid_caps(ctx: &mut Ctx) {
     ctx.stat("files_with_caps", n_caps);
 }
 
-/// Unveränderte Kopie einer Systemdatei, z. B. die Chroot-Vorlage von Collabora
-/// (/tmp/…/systemplate/lib64/ld-linux-x86-64.so.2 = /lib64/ld-linux-x86-64.so.2). Abgleich über Größe und
-/// SHA-256 mit der Datei unter demselben Pfad-Ende im System. SUID/SGID-Dateien zählen nie als harmlose Kopie.
+/// Unmodified copy of a system file, e.g. Collabora's chroot template
+/// (/tmp/…/systemplate/lib64/ld-linux-x86-64.so.2 = /lib64/ld-linux-x86-64.so.2). Compared by size and
+/// SHA-256 with the file at the same path suffix on the system. SUID/SGID files never count as a harmless copy.
 fn copy_of_system_file(ctx: &Ctx, p: &str, m: &std::fs::Metadata) -> bool {
     if m.mode() & 0o6000 != 0 || m.len() > 64 << 20 {
         return false;
@@ -228,9 +231,9 @@ fn copy_of_system_file(ctx: &Ctx, p: &str, m: &std::fs::Metadata) -> bool {
     false
 }
 
-/// Inode → (PID, Programm, Benutzer-ID) aller Dateien in temporären Ordnern, die ein laufender Prozess geladen hat
-/// (/proc/<pid>/maps). Java entpackt native Bibliotheken (jansi, JNA, Netty, Snappy, SQLite-JDBC) nach /tmp bzw.
-/// ins private /tmp des Dienstes und lädt sie von dort – Praxisfall: Elasticsearch, libjansi.so.
+/// Inode → (PID, program, user ID) of all files in temporary directories that a running process has loaded
+/// (/proc/<pid>/maps). Java unpacks native libraries (jansi, JNA, Netty, Snappy, SQLite-JDBC) to /tmp or
+/// the service's private /tmp and loads them from there – real case: Elasticsearch, libjansi.so.
 fn tmp_mapped(proc_dir: &str) -> std::collections::HashMap<u64, (i32, String, u32)> {
     let mut out = std::collections::HashMap::new();
     let Ok(rd) = std::fs::read_dir(proc_dir) else { return out };
@@ -260,7 +263,8 @@ fn tmp_mapped(proc_dir: &str) -> std::collections::HashMap<u64, (i32, String, u3
     out
 }
 
-/// Pfad im privaten Temp-Ordner eines systemd-Dienstes: …/tmp/systemd-private-<32 hex>-<dienst>.service-<x>/tmp/…
+/// Path in the private temp directory of a systemd service:
+/// …/tmp/systemd-private-<32 hex>-<service>.service-<x>/tmp/…
 fn service_private_tmp(p: &str) -> bool {
     p.split('/').any(|c| {
         c.strip_prefix("systemd-private-")
@@ -277,7 +281,7 @@ fn tmp_exec(ctx: &mut Ctx) {
             let p = e.path().to_string_lossy().into_owned();
             let name = e.file_name().to_string_lossy().into_owned();
             if e.depth() == 1 && e.file_type().is_dir() && name.starts_with('.') && !matches!(name.as_str(), ".X11-unix" | ".ICE-unix" | ".font-unix" | ".XIM-unix" | ".Test-unix") {
-                ctx.add(Severity::Medium, Category::Runtime, "tmp_hidden_dir", "Verstecktes Verzeichnis in temporärem Ordner", Some(p.clone()), None);
+                ctx.add(Severity::Medium, Category::Runtime, "tmp_hidden_dir", "Hidden directory in a temporary folder", Some(p.clone()), None);
             }
             if !e.file_type().is_file() {
                 continue;
@@ -289,43 +293,43 @@ fn tmp_exec(ctx: &mut Ctx) {
                 n_copies += 1;
                 continue;
             }
-            // native Bibliothek, die ein Dienst (nicht root, Programm außerhalb von tmp) selbst entpackt hat und geladen hält
+            // native library that a service (not root, program outside tmp) unpacked itself and keeps loaded
             if elf && name.contains(".so") && m.mode() & 0o6022 == 0 {
                 let map = mapped.get_or_insert_with(|| tmp_mapped(&ctx.p("/proc")));
                 if let Some((pid, exe, uid)) = map.get(&m.ino()).filter(|(pid, exe, uid)| *uid != 0 && *uid == m.uid() && !exe.is_empty() && !from_tmp(exe, *pid)) {
-                    ctx.add(Severity::Info, Category::Runtime, "tmp_library_loaded", "Native Bibliothek eines laufenden Programms in temporärem Ordner", Some(p),
-                        Some(format!("geladen von {exe} (PID {pid}, Benutzer-ID {uid}) – typisch für Java (JNA, jansi, Netty)")));
+                    ctx.add(Severity::Info, Category::Runtime, "tmp_library_loaded", "Native library of a running program in a temporary folder", Some(p),
+                        Some(format!("loaded by {exe} (PID {pid}, user ID {uid}) – typical of Java (JNA, jansi, Netty)")));
                     continue;
                 }
             }
-            // Bibliothek eines Dienstes in dessen privatem Temp-Ordner (systemd PrivateTmp), dem Dienst-Benutzer gehörend,
-            // gerade nicht geladen (Praxisfall: Elasticsearch entpackt jansi beim Start) – nur ein Hinweis.
-            // Ausführbare Programme dort oder Dateien von root bleiben ein Fund.
+            // library of a service in its private temp directory (systemd PrivateTmp), owned by the service user,
+            // not currently loaded (real case: Elasticsearch unpacks jansi at startup) – just a note.
+            // Executable programs there or files owned by root remain a finding.
             if elf && name.contains(".so") && m.uid() != 0 && m.mode() & 0o6022 == 0 && service_private_tmp(&p) {
-                ctx.add(Severity::Info, Category::Runtime, "tmp_library_service", "Native Bibliothek eines Dienstes in dessen privatem Temp-Ordner", Some(p),
-                    Some(format!("Benutzer-ID {} – typisch für Java (JNA, jansi, Netty)", m.uid())));
+                ctx.add(Severity::Info, Category::Runtime, "tmp_library_service", "Native library of a service in its private temp folder", Some(p),
+                    Some(format!("User ID {} – typical of Java (JNA, jansi, Netty)", m.uid())));
                 continue;
             }
             if elf || m.mode() & 0o111 != 0 {
                 let sev = if elf { Severity::High } else { Severity::Medium };
-                ctx.add(sev, Category::Runtime, "tmp_executable", if elf { "ELF-Programm in temporärem Verzeichnis" } else { "Ausführbare Datei in temporärem Verzeichnis" }, Some(p), Some(format!("Größe {} B, uid {}", m.len(), m.uid())));
+                ctx.add(sev, Category::Runtime, "tmp_executable", if elf { "ELF program in a temporary directory" } else { "Executable file in a temporary directory" }, Some(p), Some(format!("Size {} B, uid {}", m.len(), m.uid())));
             }
         }
     }
     ctx.stat("tmp_system_copies", n_copies);
 }
 
-/// Programme und Bibliotheken, die Rootkits typischerweise austauschen
+/// Programs and libraries that rootkits typically replace
 fn watched_binary(p: &str) -> bool {
     ["/usr/bin/", "/usr/sbin/", "/bin/", "/sbin/", "/usr/lib/openssh/", "/usr/libexec/openssh/"].iter().any(|d| p.starts_with(d))
         || p.contains("/security/pam_")
         || p.contains("/libc.so") || p.contains("/libpam.so") || p.contains("/libkeyutils") || p.contains("/libaudit")
-        // alle Bibliotheken der Pakete (Rootkits ersetzen gern libcrypt, libssl, libselinux, NSS-Module …)
+        // all libraries of the packages (rootkits like to replace libcrypt, libssl, libselinux, NSS modules …)
         || (["/lib/", "/lib64/", "/usr/lib/", "/usr/lib64/", "/usr/libexec/"].iter().any(|d| p.starts_with(d)) && (p.ends_with(".so") || p.contains(".so.")))
 }
 
-/// RPM-Systeme (Alma/Rocky/RHEL): SHA-256 selbst berechnen, gegen lokale RPM-DB prüfen (fälschbar) und
-/// für den Abgleich mit den offiziellen Paketen in der Zentrale melden (Plan C4).
+/// RPM systems (Alma/Rocky/RHEL): compute SHA-256 locally, check against the local RPM DB (forgeable) and
+/// report for comparison with the official packages on the central server (plan C4).
 fn binaries_rpm(ctx: &mut Ctx) {
     let mut checked = 0;
     let mut bad = 0;
@@ -345,28 +349,28 @@ fn binaries_rpm(ctx: &mut Ctx) {
         }
         if h != f.sha256 {
             bad += 1;
-            ctx.add(Severity::High, Category::Binaries, "binary_pkg_mismatch", "Programm weicht von Paket-Prüfsumme ab", Some(full), Some("Abgleich mit lokaler RPM-Datenbank (fälschbar); Referenz-Abgleich folgt serverseitig".into()));
+            ctx.add(Severity::High, Category::Binaries, "binary_pkg_mismatch", "Program differs from package checksum", Some(full), Some("Compared with the local RPM database (can be forged); reference comparison follows on the server".into()));
         }
     }
     ctx.stat("binaries_checked_rpm", checked);
     ctx.stat("binaries_mismatch_rpm", bad);
 }
 
-/// Programme der Paketverwaltung (comm, max. 15 Zeichen)
+/// Package management programs (comm, max. 15 characters)
 const PKG_TOOLS: &[&str] = &["dpkg", "apt", "apt-get", "aptitude", "unattended-upgr", "rpm", "dnf", "yum", "zypper", "packagekitd"];
 
-/// Paketverwaltung gerade aktiv oder ihre Datenbank in den letzten 10 Minuten geändert? Dann passen Dateien und
-/// Paketdatenbank während eines Updates nicht zusammen (Testlauf auf frischer VM: Check fiel in ein apt-get – 20 Fehlalarme
-/// „Programm weicht vom Paket ab“ für coreutils/libc). Liefert den Grund.
+/// Package management currently active or its database changed in the last 10 minutes? Then files and the
+/// package database do not match during an update (test run on a fresh VM: the check hit an apt-get – 20 false alarms
+/// "program differs from package" for coreutils/libc). Returns the reason.
 pub fn pkg_manager_busy(root: &str) -> Option<String> {
     let base = root.trim_end_matches('/');
     for db in ["/var/lib/dpkg/status", "/var/lib/rpm/rpmdb.sqlite", "/var/lib/rpm/Packages", "/usr/lib/sysimage/rpm/rpmdb.sqlite"] {
         let age = std::fs::metadata(format!("{base}{db}")).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok());
         if age.is_some_and(|a| a < std::time::Duration::from_secs(600)) {
-            return Some(format!("Paketdatenbank {db} vor weniger als 10 Minuten geändert"));
+            return Some(format!("Package database {db} changed less than 10 minutes ago"));
         }
     }
-    // laufende Programme nur für das Wirtssystem (Container/chroot haben eigene Prozesse nicht in /proc)
+    // running programs only for the host system (containers/chroots do not have their own processes in /proc)
     if base.is_empty() {
         for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
             if !e.file_name().to_string_lossy().bytes().all(|b| b.is_ascii_digit()) {
@@ -375,7 +379,7 @@ pub fn pkg_manager_busy(root: &str) -> Option<String> {
             if let Ok(c) = std::fs::read_to_string(e.path().join("comm")) {
                 let c = c.trim();
                 if PKG_TOOLS.contains(&c) {
-                    return Some(format!("Paketverwaltung läuft ({c})"));
+                    return Some(format!("Package manager running ({c})"));
                 }
             }
         }
@@ -387,7 +391,7 @@ fn binaries(ctx: &mut Ctx) {
     if ctx.cfg.skip_dpkg_verify {
         return;
     }
-    // während eines Updates nicht prüfen – der nächste Check holt es nach (auch keine Prüfsummen an die Zentrale)
+    // do not check during an update – the next check catches up (also no checksums sent to the central server)
     let root = ctx.p("/");
     if let Some(why) = pkg_manager_busy(&root) {
         ctx.stat("binaries_skipped", why);
@@ -413,14 +417,14 @@ fn binaries(ctx: &mut Ctx) {
     let mut done = std::collections::HashSet::new();
     for (p, expected) in entries {
         let full = ctx.p(&p);
-        // merged-/usr: /bin/ls und /usr/bin/ls sind dieselbe Datei
+        // merged /usr: /bin/ls and /usr/bin/ls are the same file
         let canon = std::fs::canonicalize(&full).map(|c| c.to_string_lossy().into_owned()).unwrap_or(full.clone());
         if !done.insert(canon.clone()) {
             continue;
         }
         let Ok(h) = tyrosd_core::hash::md5_file(&full) else { continue };
         checked += 1;
-        // für den Abgleich gegen das offizielle Paket in der Zentrale (lokale DB ist fälschbar)
+        // for comparison against the official package on the central server (the local DB is forgeable)
         if let Some(pkg) = ctx.pkgs.owner.get(&p) {
             if let Some(ver) = ctx.pkgs.versions.get(pkg) {
                 if ctx.report.binaries.len() < 30000 {
@@ -430,7 +434,7 @@ fn binaries(ctx: &mut Ctx) {
         }
         if h != expected {
             bad += 1;
-            ctx.add(Severity::High, Category::Binaries, "binary_pkg_mismatch", "Programm weicht von Paket-Prüfsumme ab", Some(full), Some("Abgleich mit lokaler dpkg-Datenbank (fälschbar); Referenz-Abgleich folgt serverseitig".into()));
+            ctx.add(Severity::High, Category::Binaries, "binary_pkg_mismatch", "Program differs from package checksum", Some(full), Some("Compared with the local dpkg database (can be forged); reference comparison follows on the server".into()));
         }
     }
     ctx.stat("binaries_checked_dpkg", checked);
@@ -438,17 +442,17 @@ fn binaries(ctx: &mut Ctx) {
     drop_if_pkg_started(ctx, &root);
 }
 
-/// Paketverwaltung hat während der Prüfung begonnen: Abweichungen und Prüfsummen dieses Durchlaufs verwerfen
+/// Package management started during the check: discard deviations and checksums of this run
 fn drop_if_pkg_started(ctx: &mut Ctx, root: &str) {
     if let Some(why) = pkg_manager_busy(root) {
         ctx.report.findings.retain(|f| f.check != "binary_pkg_mismatch");
         ctx.report.binaries.clear();
-        ctx.stat("binaries_skipped", format!("{why} (während der Prüfung)"));
+        ctx.stat("binaries_skipped", format!("{why} (during the check)"));
     }
 }
 
-/// Programm liegt in einem temporären Verzeichnis – eingehängte AppImages (z. B. Collabora in Nextcloud,
-/// /tmp/.mount_* mit echtem FUSE-Mount) ausgenommen – gemeinsame Prüfung mit der Echtzeit-Erkennung
+/// Program located in a temporary directory – mounted AppImages (e.g. Collabora in Nextcloud,
+/// /tmp/.mount_* with a real FUSE mount) excluded – shared check with real-time detection
 fn from_tmp(exe: &str, pid: i32) -> bool {
     TMP_DIRS.iter().any(|t| exe.starts_with(&format!("{t}/"))) && !tyrosd_core::trust::appimage_for(exe, Some(pid))
 }
@@ -465,27 +469,27 @@ fn processes(ctx: &mut Ctx) {
         let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).unwrap_or_default().trim().to_string();
         let desc = format!("PID {pid} {comm}: {}", cmd.chars().take(160).collect::<String>());
         if exe.starts_with("/memfd:") || exe.contains("(deleted)") && exe.starts_with("/memfd") {
-            ctx.add(Severity::Critical, Category::Runtime, "proc_memfd", "Prozess läuft aus dem Arbeitsspeicher (memfd, dateilos)", Some(exe.clone()), Some(desc.clone()));
+            ctx.add(Severity::Critical, Category::Runtime, "proc_memfd", "Process runs from memory (memfd, fileless)", Some(exe.clone()), Some(desc.clone()));
             continue;
         }
         if from_tmp(&exe, pid) {
-            ctx.add(Severity::Critical, Category::Runtime, "proc_from_tmp", "Prozess läuft aus temporärem Verzeichnis", Some(exe.clone()), Some(desc.clone()));
+            ctx.add(Severity::Critical, Category::Runtime, "proc_from_tmp", "Process runs from a temporary directory", Some(exe.clone()), Some(desc.clone()));
         }
         if let Some(orig) = exe.strip_suffix(" (deleted)") {
             if std::path::Path::new(orig).exists() && (orig.starts_with("/usr/") || orig.starts_with("/opt/")) {
-                ctx.add(Severity::Low, Category::Runtime, "proc_stale_after_update", "Prozess nach Update nicht neu gestartet", Some(orig.to_string()), Some(desc.clone()));
+                ctx.add(Severity::Low, Category::Runtime, "proc_stale_after_update", "Process not restarted after update", Some(orig.to_string()), Some(desc.clone()));
             } else {
-                ctx.add(Severity::High, Category::Runtime, "proc_deleted_exe", "Prozess, dessen Programmdatei gelöscht wurde", Some(exe.clone()), Some(desc.clone()));
+                ctx.add(Severity::High, Category::Runtime, "proc_deleted_exe", "Process whose program file was deleted", Some(exe.clone()), Some(desc.clone()));
             }
         }
         if cmd.starts_with('[') && cmd.ends_with(']') {
-            ctx.add(Severity::Critical, Category::Runtime, "proc_fake_kthread", "Prozess tarnt sich als Kernel-Thread", Some(exe.clone()), Some(desc.clone()));
+            ctx.add(Severity::Critical, Category::Runtime, "proc_fake_kthread", "Process disguises itself as a kernel thread", Some(exe.clone()), Some(desc.clone()));
         }
     }
     ctx.stat("processes", n);
 }
 
-/// Listener aus /proc/net/{tcp,tcp6,udp,udp6} mit Prozess.
+/// Listeners from /proc/net/{tcp,tcp6,udp,udp6} with process.
 pub struct Listener {
     pub proto: &'static str,
     pub addr: String,
@@ -522,7 +526,7 @@ pub fn listeners() -> Vec<Listener> {
             if f.len() < 10 || f[3] != state {
                 continue;
             }
-            // UDP: nur Sockets ohne Gegenstelle
+            // UDP: only sockets without a peer
             if proto.starts_with("udp") && !f[2].ends_with(":0000") {
                 continue;
             }
@@ -534,7 +538,7 @@ pub fn listeners() -> Vec<Listener> {
     v
 }
 
-/// Socket-Inode → (PID, comm)
+/// Socket inode → (PID, comm)
 pub fn socket_owners() -> HashMap<u64, (i32, String)> {
     let mut m = HashMap::new();
     let Ok(rd) = std::fs::read_dir("/proc") else { return m };
@@ -559,9 +563,9 @@ pub fn socket_owners() -> HashMap<u64, (i32, String)> {
 fn ports(ctx: &mut Ctx) {
     let dangerous: HashMap<u16, &str> = [
         (3306, "MySQL/MariaDB"), (5432, "PostgreSQL"), (6379, "Redis"), (11211, "Memcached"), (27017, "MongoDB"),
-        (9200, "Elasticsearch"), (9300, "Elasticsearch"), (2375, "Docker-API ohne TLS"), (2376, "Docker-API"),
-        (5984, "CouchDB"), (8086, "InfluxDB"), (9000, "PHP-FPM/FastCGI"), (5601, "Kibana"), (15672, "RabbitMQ-Verwaltung"),
-        (6443, "Kubernetes-API"), (10250, "Kubelet"), (2049, "NFS"), (111, "rpcbind"), (873, "rsync-Daemon"), (8983, "Solr"),
+        (9200, "Elasticsearch"), (9300, "Elasticsearch"), (2375, "Docker API without TLS"), (2376, "Docker API"),
+        (5984, "CouchDB"), (8086, "InfluxDB"), (9000, "PHP-FPM/FastCGI"), (5601, "Kibana"), (15672, "RabbitMQ management"),
+        (6443, "Kubernetes API"), (10250, "Kubelet"), (2049, "NFS"), (111, "rpcbind"), (873, "rsync daemon"), (8983, "Solr"),
     ].into_iter().collect();
     let owners = socket_owners();
     let ls = listeners();
@@ -571,19 +575,19 @@ fn ports(ctx: &mut Ctx) {
         if !seen.insert((l.proto, l.addr.clone(), l.port)) {
             continue;
         }
-        let bind = if l.public { "öffentlich" } else { "lokal/privat" };
+        let bind = if l.public { "public" } else { "local/private" };
         if l.public {
             ctx.confirm("listener", format!("{}:{}/{}", l.addr, l.port, l.proto), format!("{comm} (PID {pid}), {bind}"));
         }
         if let Some(svc) = dangerous.get(&l.port) {
             if l.public && l.proto.starts_with("tcp") {
-                ctx.add(Severity::High, Category::Network, "dangerous_service_public", format!("{svc} auf öffentlicher Adresse gebunden ({}:{})", l.addr, l.port), None,
-                    Some(format!("{comm} (PID {pid}); Hoster-Firewall von hier nicht sichtbar")));
+                ctx.add(Severity::High, Category::Network, "dangerous_service_public", format!("{svc} bound to a public address ({}:{})", l.addr, l.port), None,
+                    Some(format!("{comm} (PID {pid}); hosting provider firewall not visible from here")));
             }
         }
         let exe = if pid > 0 { tyrosd_core::procinfo::exe(pid).unwrap_or_default() } else { String::new() };
         if from_tmp(&exe, pid) {
-            ctx.add(Severity::Critical, Category::Network, "listener_from_tmp", "Port wird von Programm aus temporärem Verzeichnis geöffnet", Some(exe), Some(format!("{}:{}", l.addr, l.port)));
+            ctx.add(Severity::Critical, Category::Network, "listener_from_tmp", "Port opened by a program from a temporary directory", Some(exe), Some(format!("{}:{}", l.addr, l.port)));
         }
     }
     ctx.stat("listeners", ls.len());
@@ -599,11 +603,11 @@ mod tests {
         let d = std::env::temp_dir().join(format!("pkgbusy-{}", std::process::id()));
         std::fs::create_dir_all(d.join("var/lib/dpkg")).unwrap();
         let root = d.to_string_lossy().into_owned();
-        assert!(pkg_manager_busy(&root).is_none(), "keine Paketdatenbank");
+        assert!(pkg_manager_busy(&root).is_none(), "no package database");
         let f = std::fs::File::create(d.join("var/lib/dpkg/status")).unwrap();
-        assert!(pkg_manager_busy(&root).unwrap().contains("vor weniger als 10 Minuten"));
+        assert!(pkg_manager_busy(&root).unwrap().contains("less than 10 minutes ago"));
         f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(3600)).unwrap();
-        assert!(pkg_manager_busy(&root).is_none(), "altes Update");
+        assert!(pkg_manager_busy(&root).is_none(), "old update");
         std::fs::remove_dir_all(&d).ok();
     }
 
@@ -619,12 +623,12 @@ mod tests {
             std::fs::write(f, "ELF-lib").unwrap();
             std::fs::set_permissions(f, std::fs::Permissions::from_mode(0o744)).unwrap();
         }
-        // Besitzer der Bibliothek = Dienst-Benutzer (nicht root); im Test-Container als root angelegt → übertragen
+        // owner of the library = service user (not root); created as root in the test container → transfer ownership
         if std::fs::metadata(&lib).unwrap().uid() == 0 {
             std::os::unix::fs::chown(&lib, Some(1000), Some(1000)).unwrap();
         }
         let uid = std::fs::metadata(&lib).unwrap().uid();
-        // Elasticsearch (java aus dem Paket) hat die Bibliothek geladen
+        // Elasticsearch (java from the package) has loaded the library
         let pd = root.join("proc/4242");
         std::fs::create_dir_all(&pd).unwrap();
         let ino = std::fs::metadata(&lib).unwrap().ino();
@@ -638,7 +642,7 @@ Uid:	{uid}	{uid}	{uid}	{uid}
         let f = |c: &str| rep.findings.iter().filter(|f| f.check == c).filter_map(|f| f.path.clone()).collect::<Vec<_>>();
         assert_eq!(f("tmp_library_loaded").len(), 1, "{:?}", f("tmp_executable"));
         assert!(f("tmp_executable").iter().all(|p| !p.ends_with("libjansi.so")));
-        assert!(f("tmp_executable").iter().any(|p| p.ends_with("/tmp/evil.so"))); // nicht geladen → weiterhin Fund
+        assert!(f("tmp_executable").iter().any(|p| p.ends_with("/tmp/evil.so"))); // not loaded → still a finding
         assert!(super::service_private_tmp("/tmp/systemd-private-5e633f568ebd42cdb0878b8129e0e22b-elasticsearch.service-6zhrXU/tmp/elasticsearch-3/libjansi.so"));
         assert!(!super::service_private_tmp("/tmp/systemd-private-evil/tmp/x.so"));
         assert!(!super::service_private_tmp("/tmp/elasticsearch-3/libjansi.so"));
@@ -652,8 +656,8 @@ Uid:	{uid}	{uid}	{uid}	{uid}
         let tpl = root.join("tmp/systemd-private-x-apache2.service-y/tmp/coolwsd.z/systemplate/lib64");
         std::fs::create_dir_all(&tpl).unwrap();
         std::fs::create_dir_all(root.join("lib64")).unwrap();
-        // Collabora-Vorlage: unveränderte Kopie → keine Meldung; gleicher Name, anderer Inhalt → Meldung
-        for (f, body) in [(root.join("lib64/ld.so"), "ELF-orig"), (tpl.join("ld.so"), "ELF-orig"), (tpl.join("libc.so"), "ELF-fremd"), (root.join("lib64/libc.so"), "ELF-orig")] {
+        // Collabora template: unmodified copy → no report; same name, different content → report
+        for (f, body) in [(root.join("lib64/ld.so"), "ELF-orig"), (tpl.join("ld.so"), "ELF-orig"), (tpl.join("libc.so"), "ELF-other"), (root.join("lib64/libc.so"), "ELF-orig")] {
             std::fs::write(&f, body).unwrap();
             std::fs::set_permissions(&f, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
@@ -681,7 +685,7 @@ Uid:	{uid}	{uid}	{uid}	{uid}
         }
         let rep = crate::run(crate::CheckConfig { sysroot: root.to_string_lossy().into_owned(), offline: true, ..Default::default() });
         let hits: Vec<_> = rep.findings.iter().filter(|f| f.check == "suid_unowned").filter_map(|f| f.path.clone()).collect();
-        // chsh gehört dem Paket in der chroot – nur das fremde Programm wird gemeldet, und zwar im chroot-Durchgang
+        // chsh belongs to the package in the chroot – only the foreign program is reported, and in the chroot pass
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert!(hits[0].ends_with("/srv/php-build/focal/usr/bin/rootme"));
         std::fs::remove_dir_all(&root).ok();

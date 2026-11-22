@@ -1,7 +1,7 @@
-//! YARA-Regelpaket im Agent: beim Start das abgelegte Paket laden,
-//! neue Pakete laut Heartbeat-Antwort holen (signiert, nur erlaubte Quelle, nur höher), ohne Neustart austauschen,
-//! bei Fehlern das vorige behalten. Prüfen übernimmt der Webshell-Prüfer (Schreiben von Web-Code, neue Dateien in
-//! Temp-Ordnern).
+//! YARA rule pack in the agent: load the stored pack at startup,
+//! fetch new packs as announced in the heartbeat response (signed, allowed source only, higher only), swap them
+//! without a restart, keep the previous one on errors. Scanning is done by the webshell checker (writes of web
+//! code, new files in temp folders).
 
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -15,10 +15,10 @@ use crate::monitor::log;
 static ENGINE: RwLock<Option<Arc<Engine>>> = RwLock::new(None);
 static BUSY: AtomicBool = AtomicBool::new(false);
 static WARNED_SOURCE: AtomicBool = AtomicBool::new(false);
-/// nach einem Fehler höchstens einmal je Stunde neu versuchen (Unix-Sekunden des nächsten Versuchs)
+/// after an error, retry at most once per hour (Unix seconds of the next attempt)
 static RETRY_AT: AtomicU64 = AtomicU64::new(0);
 
-/// höchstens so groß wird eine Datei geprüft
+/// files are scanned up to this size at most
 pub const MAX_WEB: u64 = 2 << 20;
 pub const MAX_OTHER: u64 = 8 << 20;
 
@@ -51,7 +51,7 @@ pub fn loaded_version() -> Option<String> {
     ENGINE.read().ok()?.as_ref().map(|e| e.version.clone())
 }
 
-/// abgelegtes Paket laden (Fehler → voriges Paket); läuft im eigenen Thread, der Agent startet sofort
+/// load the stored pack (error → previous pack); runs in its own thread, the agent starts immediately
 fn load(data_dir: &str) {
     let mut tries = 0;
     while let Some(v) = rules::current(data_dir) {
@@ -60,13 +60,13 @@ fn load(data_dir: &str) {
         match Engine::load(&rules::dir(data_dir, &v), &v) {
             Ok(e) => {
                 let delta = rss_kb().saturating_sub(before);
-                log(format!("YARA-Regeln {v}: {} Regeln geladen ({} ms, +{} MB)", e.count, e.compile_ms, delta / 1024));
+                log(format!("YARA rules {v}: {} rules loaded ({} ms, +{} MB)", e.count, e.compile_ms, delta / 1024));
                 set_status(&v, e.count, delta, "");
                 *ENGINE.write().unwrap() = Some(Arc::new(e));
                 return;
             }
             Err(e) => {
-                log(format!("YARA-Regeln {v} laden nicht: {e:#}"));
+                log(format!("YARA rules {v} failed to load: {e:#}"));
                 set_status("", 0, 0, &format!("{v}: {e:#}"));
                 if tries > 3 || rules::fall_back(data_dir, &v).is_none() {
                     return;
@@ -80,7 +80,7 @@ pub fn start(data_dir: String) {
     let _ = std::thread::Builder::new().name("yara-load".into()).spawn(move || load(&data_dir));
 }
 
-/// Heartbeat-Antwort: neueres Paket angeboten → holen und laden
+/// Heartbeat response: newer pack offered → fetch and load
 pub fn on_ack(version: &str, base: &str, sources: &[String], data_dir: &str) {
     let Some(want) = rules::number(version) else { return };
     let have = loaded_version().or_else(|| rules::current(data_dir));
@@ -89,7 +89,7 @@ pub fn on_ack(version: &str, base: &str, sources: &[String], data_dir: &str) {
     }
     if !update::source_allowed(base, sources) {
         if !WARNED_SOURCE.swap(true, Ordering::SeqCst) {
-            log(format!("Regel-Quelle {base} nicht erlaubt (update_sources) – ignoriert"));
+            log(format!("Rule source {base} not allowed (update_sources) – ignored"));
         }
         return;
     }
@@ -100,12 +100,12 @@ pub fn on_ack(version: &str, base: &str, sources: &[String], data_dir: &str) {
     let _ = std::thread::Builder::new().name("yara-update".into()).spawn(move || {
         match rules::fetch_newer(&base, &dd, have.as_deref()) {
             Ok(Some(v)) => {
-                log(format!("YARA-Regelpaket {v} geholt"));
+                log(format!("YARA rule pack {v} fetched"));
                 load(&dd);
             }
             Ok(None) => {}
             Err(e) => {
-                log(format!("YARA-Regelpaket abgelehnt: {e:#}"));
+                log(format!("YARA rule pack rejected: {e:#}"));
                 set_status("", 0, 0, &format!("{e:#}"));
                 RETRY_AT.store(now() + 3600, Ordering::Relaxed);
             }
@@ -114,10 +114,15 @@ pub fn on_ack(version: &str, base: &str, sources: &[String], data_dir: &str) {
     });
 }
 
-/// Datei prüfen (gelesen höchstens `limit` Bytes; größere Dateien werden nicht geprüft)
+/// Scan a file (reads at most `limit` bytes; larger files are not scanned)
 pub fn scan_path(path: &str, limit: u64) -> Vec<Hit> {
     let Some(engine) = ENGINE.read().ok().and_then(|g| g.clone()) else { return Vec::new() };
-    let Ok(f) = std::fs::File::open(path) else { return Vec::new() };
+    // do not follow symlinks (a website user could replace the file between event and scan with a link to
+    // a root file), non-blocking (FIFO); regular files only (below)
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(f) = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) else {
+        return Vec::new();
+    };
     let Ok(meta) = f.metadata() else { return Vec::new() };
     if !meta.is_file() || meta.len() == 0 || meta.len() > limit {
         return Vec::new();
@@ -129,7 +134,7 @@ pub fn scan_path(path: &str, limit: u64) -> Vec<Hit> {
     engine.scan(&data)
 }
 
-/// neue/geänderte Datei in einem Temp-Ordner (Ablage für nachgeladene Schadprogramme)
+/// new/changed file in a temp folder (drop location for downloaded malware)
 pub fn tmp_file(path: &str) -> bool {
     let l = tyrosd_core::container::effective(path);
     (l.starts_with("/tmp/") || l.starts_with("/var/tmp/") || l.starts_with("/dev/shm/")) && !l.contains("/systemd-private-")

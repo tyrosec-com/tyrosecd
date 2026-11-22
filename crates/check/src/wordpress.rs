@@ -1,5 +1,5 @@
-//! WordPress: Core- und Plugin-Dateien gegen die offiziellen Prüfsummen von
-//! WordPress.org, unbekannte Dateien im Core, PHP in Uploads, Must-Use-Plugins.
+//! WordPress: core and plugin files against the official checksums from
+//! WordPress.org, unknown files in core, PHP in uploads, must-use plugins.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -22,7 +22,7 @@ fn agent() -> &'static ureq::Agent {
     })
 }
 
-/// GET → JSON. `Ok(None)` bei 404.
+/// GET → JSON. `Ok(None)` on 404.
 fn get_json(url: &str) -> Result<Option<Value>, String> {
     match agent().get(url).call() {
         Ok(r) => r.into_json::<Value>().map(Some).map_err(|e| e.to_string()),
@@ -41,13 +41,13 @@ fn re(s: &str) -> Regex {
     Regex::new(s).unwrap()
 }
 
-/// WordPress-Installationen unter den Webroots finden (Tiefe ≤ 5).
+/// Find WordPress installations under the webroots (depth ≤ 5).
 pub fn find(webroots: &[String]) -> Vec<WpInstall> {
     find_in(&FsRoot::host(""), webroots)
 }
 
-/// Wie `find`, unter einer Wurzel (Container: `FsRoot::Contained`, Webroots und Ergebnis relativ zur Wurzel).
-/// Gelesen wird nur über `FsRoot` (Container: openat2, nur reguläre Dateien, ≤ 1 MiB).
+/// Like `find`, under a root (containers: `FsRoot::Contained`, webroots and result relative to the root).
+/// Reads only via `FsRoot` (containers: openat2, regular files only, ≤ 1 MiB).
 pub fn find_in(fs: &FsRoot, webroots: &[String]) -> Vec<WpInstall> {
     let ver_re = re(r#"\$wp_version\s*=\s*'([^']+)'"#);
     let loc_re = re(r#"\$wp_local_package\s*=\s*'([^']+)'"#);
@@ -107,7 +107,7 @@ pub fn check(ctx: &mut Ctx) {
 
 fn core(ctx: &mut Ctx, wp: &WpInstall, checked: &mut usize) {
     if ctx.cfg.offline {
-        ctx.report.notes.push(format!("Offline: WordPress-Core {} in {} nicht gegen WordPress.org geprüft", wp.version, wp.root));
+        ctx.report.notes.push(format!("Offline: WordPress core {} in {} not checked against WordPress.org", wp.version, wp.root));
         return;
     }
     let url = format!(
@@ -118,12 +118,12 @@ fn core(ctx: &mut Ctx, wp: &WpInstall, checked: &mut usize) {
         Ok(Some(v)) => v.get("checksums").cloned().unwrap_or(Value::Null),
         Ok(None) => Value::Null,
         Err(e) => {
-            ctx.report.notes.push(format!("WordPress.org nicht erreichbar ({e}); Core nicht geprüft"));
+            ctx.report.notes.push(format!("WordPress.org not reachable ({e}); core not checked"));
             return;
         }
     };
     if !sums.is_object() && wp.locale != "en_US" {
-        // Fallback: englische Prüfsummen
+        // fallback: English checksums
         let url = format!("https://api.wordpress.org/core/checksums/1.0/?version={}&locale=en_US", wp.version);
         if let Ok(Some(v)) = get_json(&url) {
             sums = v.get("checksums").cloned().unwrap_or(Value::Null);
@@ -131,15 +131,15 @@ fn core(ctx: &mut Ctx, wp: &WpInstall, checked: &mut usize) {
     }
     let Some(map) = sums.as_object() else {
         ctx.add(Severity::Medium, Category::Web, "wp_core_no_reference",
-            format!("Keine offiziellen Prüfsummen für WordPress {} ({})", wp.version, wp.locale),
-            Some(wp.root.clone()), Some("Version unbekannt oder manipuliert (wp-includes/version.php prüfen)".into()));
+            format!("No official checksums for WordPress {} ({})", wp.version, wp.locale),
+            Some(wp.root.clone()), Some("Unknown or tampered version (check wp-includes/version.php)".into()));
         return;
     };
     let mut modified = 0;
     let mut known: std::collections::HashSet<String> = Default::default();
     for (rel, sum) in map {
         known.insert(rel.clone());
-        // wp-content (Standard-Themes/-Plugins) wird separat aktualisiert
+        // wp-content (default themes/plugins) is updated separately
         if rel.starts_with("wp-content/") {
             continue;
         }
@@ -156,17 +156,17 @@ fn core(ctx: &mut Ctx, wp: &WpInstall, checked: &mut usize) {
                 let hits = web::scan_file(&full);
                 let sev = if hits.is_empty() { sev } else { Severity::Critical };
                 ctx.add(sev, Category::Web, "wp_core_modified",
-                    "WordPress-Core-Datei weicht von offizieller Prüfsumme ab", Some(full),
-                    Some(if hits.is_empty() { format!("WordPress {}", wp.version) } else { format!("WordPress {} · Muster: {}", wp.version, hits.join(", ")) }));
+                    "WordPress core file differs from official checksum", Some(full),
+                    Some(if hits.is_empty() { format!("WordPress {}", wp.version) } else { format!("WordPress {} · Pattern: {}", wp.version, hits.join(", ")) }));
             }
             None => {
                 if rel.starts_with("wp-admin/") || rel.starts_with("wp-includes/") {
-                    ctx.add(Severity::Low, Category::Web, "wp_core_missing", "WordPress-Core-Datei fehlt", Some(full), None);
+                    ctx.add(Severity::Low, Category::Web, "wp_core_missing", "WordPress core file missing", Some(full), None);
                 }
             }
         }
     }
-    // Unbekannte Dateien in wp-admin / wp-includes / Root
+    // unknown files in wp-admin / wp-includes / root
     for sub in ["wp-admin", "wp-includes"] {
         for e in walkdir::WalkDir::new(format!("{}/{}", wp.root, sub)).follow_links(false).into_iter().flatten() {
             if !e.file_type().is_file() {
@@ -177,8 +177,8 @@ fn core(ctx: &mut Ctx, wp: &WpInstall, checked: &mut usize) {
             if !known.contains(&rel) {
                 let hits = web::scan_file(&full);
                 let sev = if !hits.is_empty() { Severity::Critical } else if is_php(&rel) { Severity::High } else { Severity::Low };
-                ctx.add(sev, Category::Web, "wp_core_unknown_file", "Unbekannte Datei im WordPress-Core", Some(full),
-                    if hits.is_empty() { None } else { Some(format!("Muster: {}", hits.join(", "))) });
+                ctx.add(sev, Category::Web, "wp_core_unknown_file", "Unknown file in the WordPress core", Some(full),
+                    if hits.is_empty() { None } else { Some(format!("Pattern: {}", hits.join(", "))) });
             }
         }
     }
@@ -189,20 +189,20 @@ fn core(ctx: &mut Ctx, wp: &WpInstall, checked: &mut usize) {
                 let full = e.path().to_string_lossy().into_owned();
                 let hits = web::scan_file(&full);
                 let sev = if hits.is_empty() { Severity::Medium } else { Severity::Critical };
-                ctx.add(sev, Category::Web, "wp_root_unknown_php", "Unbekannte PHP-Datei im WordPress-Verzeichnis", Some(full),
-                    if hits.is_empty() { Some("kein Teil von WordPress; Herkunft klären".into()) } else { Some(format!("Muster: {}", hits.join(", "))) });
+                ctx.add(sev, Category::Web, "wp_root_unknown_php", "Unknown PHP file in the WordPress directory", Some(full),
+                    if hits.is_empty() { Some("not part of WordPress; clarify origin".into()) } else { Some(format!("Pattern: {}", hits.join(", "))) });
             }
         }
     }
     ctx.stat(&format!("wp_core_modified:{}", wp.root), modified);
 }
 
-/// Plugin-Header lesen: (Version)
+/// read the plugin header: (version)
 pub fn plugin_version(dir: &Path) -> Option<String> {
     plugin_version_in(&FsRoot::host(""), &dir.to_string_lossy())
 }
 
-/// Wie `plugin_version`, Verzeichnis relativ zur Wurzel `fs`
+/// Like `plugin_version`, directory relative to the root `fs`
 pub fn plugin_version_in(fs: &FsRoot, dir: &str) -> Option<String> {
     let name_re = re(r"(?mi)^[ \t/*#@]*Plugin Name\s*:");
     let ver_re = re(r"(?mi)^[ \t/*#@]*Version\s*:\s*([^\s*]+)");
@@ -232,7 +232,7 @@ fn plugins(ctx: &mut Ctx, wp: &WpInstall) -> (usize, Vec<String>) {
         }
         let slug = e.file_name().to_string_lossy().into_owned();
         let Some(version) = plugin_version(&e.path()) else {
-            without.push(format!("{slug} (ohne Version)"));
+            without.push(format!("{slug} (no version)"));
             continue;
         };
         let refs = if ctx.cfg.offline {
@@ -241,7 +241,7 @@ fn plugins(ctx: &mut Ctx, wp: &WpInstall) -> (usize, Vec<String>) {
             match get_json(&format!("https://downloads.wordpress.org/plugin-checksums/{slug}/{version}.json")) {
                 Ok(v) => v,
                 Err(err) => {
-                    ctx.report.notes.push(format!("Plugin {slug}: Prüfsummen nicht abrufbar ({err})"));
+                    ctx.report.notes.push(format!("Plugin {slug}: checksums not available ({err})"));
                     None
                 }
             }
@@ -261,8 +261,8 @@ fn plugins(ctx: &mut Ctx, wp: &WpInstall) -> (usize, Vec<String>) {
         let Some(files) = files else {
             without.push(format!("{slug} {version}"));
             ctx.add(Severity::Info, Category::Web, "wp_plugin_no_reference",
-                format!("Plugin ohne offizielle Prüfsummen: {slug} {version}"), Some(e.path().to_string_lossy().into_owned()),
-                Some("Premium-, eigenes oder entferntes Plugin: nur Muster-Prüfung".into()));
+                format!("Plugin without official checksums: {slug} {version}"), Some(e.path().to_string_lossy().into_owned()),
+                Some("Premium, custom or removed plugin: pattern scan only".into()));
             continue;
         };
         with += 1;
@@ -282,8 +282,8 @@ fn plugins(ctx: &mut Ctx, wp: &WpInstall) -> (usize, Vec<String>) {
                         let hits = web::scan_file(&full);
                         let sev = if !hits.is_empty() { Severity::Critical } else if is_php(rel) || rel.ends_with(".js") { Severity::High } else { Severity::Low };
                         ctx.add(sev, Category::Web, "wp_plugin_modified",
-                            format!("Plugin-Datei weicht ab ({slug} {version})"), Some(full),
-                            if hits.is_empty() { None } else { Some(format!("Muster: {}", hits.join(", "))) });
+                            format!("Plugin file differs ({slug} {version})"), Some(full),
+                            if hits.is_empty() { None } else { Some(format!("Pattern: {}", hits.join(", "))) });
                     }
                     None => {}
                 },
@@ -291,8 +291,8 @@ fn plugins(ctx: &mut Ctx, wp: &WpInstall) -> (usize, Vec<String>) {
                     let hits = web::scan_file(&full);
                     let sev = if hits.is_empty() { Severity::High } else { Severity::Critical };
                     ctx.add(sev, Category::Web, "wp_plugin_unknown_php",
-                        format!("Unbekannte PHP-Datei in Plugin {slug} {version}"), Some(full),
-                        if hits.is_empty() { None } else { Some(format!("Muster: {}", hits.join(", "))) });
+                        format!("Unknown PHP file in plugin {slug} {version}"), Some(full),
+                        if hits.is_empty() { None } else { Some(format!("Pattern: {}", hits.join(", "))) });
                 }
                 None => {}
             }
@@ -310,13 +310,13 @@ fn uploads(ctx: &mut Ctx, wp: &WpInstall) {
         let full = e.path().to_string_lossy().into_owned();
         if is_php(&full) {
             let hits = web::scan_file(&full);
-            // index.php mit „Silence is golden“ ist harmlos
+            // index.php with "Silence is golden" is harmless
             if hits.is_empty() && full.ends_with("/index.php") && e.metadata().map(|m| m.len() < 64).unwrap_or(false) {
                 continue;
             }
             let sev = if hits.is_empty() { Severity::High } else { Severity::Critical };
-            ctx.add(sev, Category::Web, "php_in_uploads", "PHP-Datei im Upload-Verzeichnis", Some(full),
-                if hits.is_empty() { None } else { Some(format!("Muster: {}", hits.join(", "))) });
+            ctx.add(sev, Category::Web, "php_in_uploads", "PHP file in the upload directory", Some(full),
+                if hits.is_empty() { None } else { Some(format!("Pattern: {}", hits.join(", "))) });
         }
     }
 }
@@ -328,9 +328,9 @@ fn mu_plugins(ctx: &mut Ctx, wp: &WpInstall) {
             let full = e.path().to_string_lossy().into_owned();
             let hits = web::scan_file(&full);
             if !hits.is_empty() {
-                ctx.add(Severity::Critical, Category::Web, "wp_mu_plugin_suspicious", "Verdächtiges Must-Use-Plugin", Some(full.clone()), Some(format!("Muster: {}", hits.join(", "))));
+                ctx.add(Severity::Critical, Category::Web, "wp_mu_plugin_suspicious", "Suspicious must-use plugin", Some(full.clone()), Some(format!("Pattern: {}", hits.join(", "))));
             }
-            ctx.confirm("wp_mu_plugin", full, "Must-Use-Plugin (wird immer geladen)");
+            ctx.confirm("wp_mu_plugin", full, "Must-use plugin (always loaded)");
         }
     }
 }

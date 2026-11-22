@@ -1,25 +1,25 @@
-//! Lokale Paket-Datenbank: welche Dateien gehören zu Paketen, plus
-//! dpkg-md5sums. **Achtung:** lokal und damit für Root-Angreifer fälschbar;
-//! im Produkt kommt der Abgleich aus der Referenz-Hash-Datenbank (21.2).
+//! Local package database: which files belong to packages, plus
+//! dpkg md5sums. **Caution:** local and therefore forgeable by a root attacker;
+//! in the product the comparison comes from the reference hash database (21.2).
 
 use std::collections::{HashMap, HashSet};
 
 use tyrosd_core::rootfs::{self, FsRoot};
 
-/// höchstens so viele Bytes Paketdatenbank je Wurzel (alle Dateien zusammen)
+/// at most this many bytes of package database per root (all files combined)
 const TOTAL_BUDGET: u64 = 512 << 20;
-/// höchstens so viele Einträge in /var/lib/dpkg/info
+/// at most this many entries in /var/lib/dpkg/info
 const MAX_DPKG_INFO: usize = 200_000;
 
 pub struct PackageDb {
     pub kind: &'static str,
     pub files: HashSet<String>,
-    /// absoluter Pfad → md5 (nur dpkg)
+    /// absolute path → md5 (dpkg only)
     pub md5: HashMap<String, String>,
-    /// Pfad → Binärpaket (aus <paket>.md5sums), Paket → installierte Version (dpkg status)
+    /// path → binary package (from <package>.md5sums), package → installed version (dpkg status)
     pub owner: HashMap<String, String>,
     pub versions: HashMap<String, String>,
-    /// RPM: Pfad → (Paket, EVR „Epoche:Version-Release“, Architektur, SHA-256 laut lokaler RPM-DB)
+    /// RPM: path → (package, EVR "epoch:version-release", architecture, SHA-256 according to the local RPM DB)
     pub rpm: HashMap<String, RpmFile>,
 }
 
@@ -31,13 +31,14 @@ pub struct RpmFile {
     pub sha256: String,
 }
 
-/// Eine Zeile der rpm-Abfrage in `PackageDb::load` (Pfad, Paket, EVR, Architektur, Digest-Verfahren, Digest; Tab-getrennt)
+/// One line of the rpm query in `PackageDb::load` (path, package, EVR, architecture, digest algorithm, digest;
+/// tab-separated)
 pub fn parse_rpm_line(l: &str) -> Option<(String, RpmFile)> {
     let f: Vec<&str> = l.split('\t').collect();
     if f.len() < 6 || !f[0].starts_with('/') {
         return None;
     }
-    // Digest nur übernehmen, wenn SHA-256 (Algorithmus 8); leere Digests = Verzeichnis/Symlink
+    // take the digest only if SHA-256 (algorithm 8); empty digests = directory/symlink
     let sha = if f[4] == "8" && f[5].len() == 64 { f[5].to_string() } else { String::new() };
     Some((f[0].to_string(), RpmFile { name: f[1].to_string(), evr: f[2].to_string(), arch: f[3].to_string(), sha256: sha }))
 }
@@ -47,8 +48,8 @@ impl PackageDb {
         PackageDb::load_in(&FsRoot::host(sysroot))
     }
 
-    /// Paketdatenbank unter einer Wurzel; Container-Wurzeln als `FsRoot::Contained` (openat2, nur reguläre Dateien,
-    /// Größengrenze je Datei und insgesamt). rpm nur für das eigene System.
+    /// Package database under a root; container roots as `FsRoot::Contained` (openat2, regular files only,
+    /// size limit per file and in total). rpm only for the own system.
     pub fn load_in(fs: &FsRoot) -> PackageDb {
         let mut budget = TOTAL_BUDGET;
         let mut rd_str = |rel: &str, limit: u64| -> Option<String> {
@@ -59,7 +60,7 @@ impl PackageDb {
             budget = budget.saturating_sub(s.len() as u64);
             Some(s)
         };
-        let mut db = PackageDb { kind: "keine", files: HashSet::new(), md5: HashMap::new(), owner: HashMap::new(), versions: HashMap::new(), rpm: HashMap::new() };
+        let mut db = PackageDb { kind: "none", files: HashSet::new(), md5: HashMap::new(), owner: HashMap::new(), versions: HashMap::new(), rpm: HashMap::new() };
         if fs.is_dir("/var/lib/dpkg/info") {
             db.kind = "dpkg";
             for (name, _) in fs.read_dir("/var/lib/dpkg/info", MAX_DPKG_INFO) {
@@ -69,7 +70,7 @@ impl PackageDb {
                         db.files.extend(s.lines().filter(|l| !l.is_empty()).map(str::to_string));
                     }
                 } else if name.ends_with(".md5sums") {
-                    // „libc6:amd64.md5sums“ → Paket „libc6“
+                    // "libc6:amd64.md5sums" → package "libc6"
                     let pkg = name.trim_end_matches(".md5sums").split(':').next().unwrap_or("").to_string();
                     if let Some(s) = rd_str(&rel, rootfs::PKG_DB) {
                         for l in s.lines() {
@@ -82,12 +83,12 @@ impl PackageDb {
                     }
                 }
             }
-            // Konfigurationsdateien (/etc/cron.d/certbot …): md5 steht im dpkg-Status unter „Conffiles:“
+            // config files (/etc/cron.d/certbot …): the md5 is in the dpkg status under "Conffiles:"
             if let Some(s) = rd_str("/var/lib/dpkg/status", rootfs::PKG_DB) {
                 let mut in_conf = false;
                 let mut cur = String::new();
                 for l in s.lines() {
-                    // installierte Version je Paket (für den Referenz-Abgleich in der Zentrale)
+                    // installed version per package (for the reference comparison on the central server)
                     if let Some(p) = l.strip_prefix("Package: ") {
                         cur = p.trim().to_string();
                     } else if let Some(v) = l.strip_prefix("Version: ") {
@@ -125,7 +126,8 @@ impl PackageDb {
             return db;
         }
         if fs.is_host_root() && which("rpm") {
-            // Einzelwerte in der Array-Schleife als %{=TAG} (sonst: „array iterator used with different sized arrays“)
+            // single values inside the array loop as %{=TAG}
+            // (otherwise: "array iterator used with different sized arrays")
             let qf = "[%{FILENAMES}\\t%{=NAME}\\t%{=EPOCHNUM}:%{=VERSION}-%{=RELEASE}\\t%{=ARCH}\\t%{=FILEDIGESTALGO}\\t%{FILEDIGESTS}\\n]";
             if let Ok(out) = std::process::Command::new("rpm").args(["-qa", "--qf", qf]).output() {
                 db.kind = "rpm";
@@ -143,7 +145,7 @@ impl PackageDb {
         db
     }
 
-    /// Gehört der Pfad zu einem Paket? Berücksichtigt merged-/usr.
+    /// Does the path belong to a package? Takes merged /usr into account.
     pub fn owns(&self, p: &str) -> bool {
         if self.files.contains(p) {
             return true;
@@ -174,12 +176,12 @@ impl PackageDb {
 mod rpm_tests {
     #[test]
     fn rpm_lines() {
-        assert!(super::parse_rpm_line("/usr/sbin/sshd	openssh-server").is_none()); // zu wenige Spalten
+        assert!(super::parse_rpm_line("/usr/sbin/sshd	openssh-server").is_none()); // too few columns
         let l = format!("/usr/sbin/sshd	openssh-server	0:8.7p1-38.el9	x86_64	8	{}", "ab".repeat(32));
         let (p, f) = super::parse_rpm_line(&l).unwrap();
         assert_eq!((p.as_str(), f.name.as_str(), f.evr.as_str(), f.arch.as_str()), ("/usr/sbin/sshd", "openssh-server", "0:8.7p1-38.el9", "x86_64"));
         assert_eq!(f.sha256.len(), 64);
-        let l = format!("/usr/bin/x	foo	0:1-1.el7	x86_64	1	{}", "ab".repeat(16)); // md5 (EL7) → kein SHA-256
+        let l = format!("/usr/bin/x	foo	0:1-1.el7	x86_64	1	{}", "ab".repeat(16)); // md5 (EL7) → no SHA-256
         assert!(super::parse_rpm_line(&l).unwrap().1.sha256.is_empty());
         assert!(super::parse_rpm_line("/etc	filesystem	0:3.16-2.el9	x86_64	8	").unwrap().1.sha256.is_empty());
     }

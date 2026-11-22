@@ -1,5 +1,5 @@
-//! Debounce/Coalesce: Rohereignisse pro Pfad sammeln und erst nach einer
-//! Ruhezeit verarbeiten (Editoren, Temp-Datei + Rename, Deploys).
+//! Debounce/coalesce: collect raw events per path and only process them after a
+//! quiet period (editors, temp file + rename, deploys).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Condvar, Mutex};
@@ -24,7 +24,7 @@ pub struct Debouncer {
     processor: Arc<Processor>,
 }
 
-/// Rangfolge beim Zusammenfassen: das „stärkste“ Ereignis gewinnt.
+/// Precedence when coalescing: the "strongest" event wins.
 fn rank(op: Op) -> u8 {
     match op {
         Op::Attrib => 1,
@@ -34,7 +34,7 @@ fn rank(op: Op) -> u8 {
         Op::Create => 4,
         Op::Delete => 5,
         Op::Overflow => 6,
-        Op::Exec => 0, // läuft nicht durch die Zusammenfassung (siehe push)
+        Op::Exec => 0, // does not go through coalescing (see push)
     }
 }
 
@@ -57,8 +57,8 @@ impl Debouncer {
 
     pub fn push(&self, ev: RawEvent) {
         if ev.op == Op::Overflow || ev.op == Op::Exec {
-            // sofort durchreichen; Programmstarts nie mit Dateiänderungen desselben Pfads zusammenfassen (sonst ginge
-            // z. B. das CREATE einer ausführbaren Datei in /tmp im EXEC unter)
+            // pass through immediately; never coalesce program starts with file changes on the same path (otherwise
+            // e.g. the CREATE of an executable file in /tmp would be lost in the EXEC)
             let exec = ev.op == Op::Exec;
             self.processor.process(Input {
                 ts_ns: ev.ts_ns,
@@ -77,7 +77,7 @@ impl Debouncer {
         match g.get_mut(&ev.path) {
             Some(p) => {
                 p.last_ts = ev.ts_ns;
-                // Delete gefolgt von Create = Ersetzen → Modify
+                // Delete followed by Create = replace → Modify
                 let new_op = match (p.op, ev.op) {
                     (Op::Delete, Op::Create) | (Op::Delete, Op::Rename) => Op::Modify,
                     (Op::Create, Op::Delete) => Op::Delete,

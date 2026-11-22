@@ -1,13 +1,13 @@
-//! Access-Logs von nginx und Apache (Plan C2, Runde 3).
+//! Access logs of nginx and Apache (plan C2, round 3).
 //!
-//! Der Agent wertet die Logs selbst aus und meldet nur Befunde – keine ganzen Logs (Datenmenge,
-//! Besucher-IPs). Erkannt werden:
-//! - **Aufruf einer neu angelegten PHP-Datei** (aus der Dateiüberwachung der letzten 7 Tage) → Webshell wird benutzt
-//! - **POST auf PHP in Upload-Ordnern**
-//! - **Sensible Datei ausgeliefert** (200 auf `.env`, `.git/`, Datenbank-Dumps, Backups, phpinfo …)
-//! - **WordPress-Logins**: Fehlversuche je IP zusammengefasst, Erfolg einzeln → Kette „Brute-Force → Login“ in der Zentrale
+//! The agent analyzes the logs itself and reports only findings – no full logs (data volume,
+//! visitor IPs). Detected are:
+//! - **Request to a newly created PHP file** (from file monitoring of the last 7 days) → a webshell is being used
+//! - **POST to PHP in upload directories**
+//! - **Sensitive file served** (200 on `.env`, `.git/`, database dumps, backups, phpinfo …)
+//! - **WordPress logins**: failed attempts aggregated per IP, success individually → "brute force → login" chain on server
 //!
-//! Formate: combined / common, optional mit vorangestelltem `vhost:port` (vhost_combined).
+//! Formats: combined / common, optionally with a leading `vhost:port` (vhost_combined).
 use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,14 +21,14 @@ fn now_s() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
 
-/// Köder (Plan „Köder-Zugangsdaten“): geheime Adresse und Dateiname je Köder, gesetzt vom Agenten beim Start und nach
-/// jedem Anlegen/Entfernen. Die geheime Adresse steht nur in der Köder-Datei – wer sie aufruft, hat die Datei gelesen.
+/// Decoys (plan "decoy credentials"): secret address and file name per decoy, set by the agent at startup and after
+/// every creation/removal. The secret address is only in the decoy file – whoever requests it has read the file.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DecoyWeb {
     pub id: u64,
-    /// z. B. „/admin-backup-7f3a/“ (immer mit zufälligem Teil), leer = keine geheime Adresse
+    /// e.g. "/admin-backup-7f3a/" (always with a random part), empty = no secret address
     pub url_path: String,
-    /// Dateiname der Köder-Datei (Abruf über das Web = Scanner, kein Einbruch)
+    /// file name of the decoy file (retrieval via the web = scanner, not an intrusion)
     pub file_name: String,
 }
 
@@ -38,7 +38,7 @@ pub fn set_decoys(v: Vec<DecoyWeb>) {
     *DECOYS.write().unwrap_or_else(|e| e.into_inner()) = v;
 }
 
-/// Treffer einer Anfrage auf einen Köder: (Köder, true = geheime Adresse, false = Köder-Datei abgerufen)
+/// Hit of a request on a decoy: (decoy, true = secret address, false = decoy file retrieved)
 pub fn decoy_hit(path: &str) -> Option<(DecoyWeb, bool)> {
     let list = DECOYS.read().unwrap_or_else(|e| e.into_inner());
     for d in list.iter() {
@@ -55,7 +55,7 @@ pub fn decoy_hit(path: &str) -> Option<(DecoyWeb, bool)> {
     None
 }
 
-/// Eine Anfrage aus dem Access-Log.
+/// A request from the access log.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Req {
     pub vhost: String,
@@ -75,14 +75,14 @@ fn re_line() -> &'static Regex {
     })
 }
 
-/// URL-Dekodierung (%xx), ungültige Folgen bleiben stehen.
+/// URL decoding (%xx), invalid sequences are left as they are.
 fn url_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%' && i + 2 < b.len() {
-            // %00 bleibt stehen (Null-Zeichen bricht Datenbank/JSON und ist ohnehin ein Angriffsmuster)
+            // %00 is left as is (a null character breaks database/JSON and is an attack pattern anyway)
             if let Some(v) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok()).filter(|v| *v != 0) {
                 out.push(v);
                 i += 3;
@@ -116,35 +116,35 @@ fn is_php(p: &str) -> bool {
     [".php", ".phtml", ".phar", ".php5", ".php7", ".pht"].iter().any(|e| l.ends_with(e))
 }
 
-/// Dateien, die nie öffentlich ausgeliefert werden sollten (Status 200 mit Inhalt = Datenleck).
+/// Files that should never be served publicly (status 200 with content = data leak).
 pub fn sensitive(path: &str) -> Option<&'static str> {
     let l = path.to_ascii_lowercase();
     let name = l.rsplit('/').next().unwrap_or("");
     if name == ".env" || name.starts_with(".env.") {
-        return Some("Umgebungsdatei mit Zugangsdaten (.env)");
+        return Some("Environment file with credentials (.env)");
     }
     if l.contains("/.git/") || l.ends_with("/.git") {
-        return Some("Git-Verzeichnis (Quellcode, Zugangsdaten)");
+        return Some("Git directory (source code, credentials)");
     }
     if l.contains("/.svn/") || name == ".htpasswd" || name == ".htaccess.bak" {
-        return Some("Versionsverwaltung bzw. Passwortdatei");
+        return Some("Version control or password file");
     }
     if [".sql", ".sql.gz", ".sql.zip", ".sql.bz2", ".dump"].iter().any(|e| name.ends_with(e)) {
-        return Some("Datenbank-Dump");
+        return Some("Database dump");
     }
     if ["wp-config", "config", "configuration", "env.php", "settings.php", "localsettings.php", "parameters"].iter().any(|b| name.starts_with(b))
         && [".bak", ".old", ".orig", ".save", ".swp", "~", ".txt", ".backup", ".1"].iter().any(|e| name.ends_with(e))
     {
-        return Some("Sicherungskopie einer Konfigurationsdatei");
+        return Some("Backup copy of a configuration file");
     }
     if ["backup.zip", "backup.tar.gz", "backup.tgz", "site.zip", "www.zip", "htdocs.zip", "public_html.zip", "backup.sql"].contains(&name) {
-        return Some("Komplett-Sicherung");
+        return Some("Full backup");
     }
     if ["phpinfo.php", "info.php", "php_info.php"].contains(&name) {
-        return Some("phpinfo() (Serverdetails)");
+        return Some("phpinfo() (server details)");
     }
     if l == "/server-status" || l == "/server-info" {
-        return Some("Apache-Statusseite");
+        return Some("Apache status page");
     }
     None
 }
@@ -154,7 +154,7 @@ fn in_upload_dir(p: &str) -> bool {
     ["/uploads/", "/upload/", "/images/", "/media/", "/files/", "/tmp/", "/cache/", "/assets/"].iter().any(|d| l.contains(d))
 }
 
-/// Neu angelegte PHP-Dateien aus der Dateiüberwachung (Pfad → (Zeitpunkt, anlegender Prozess)), 7 Tage.
+/// Newly created PHP files from file monitoring (path → (time, creating process)), 7 days.
 #[derive(Default)]
 pub struct RecentPhp {
     files: Mutex<HashMap<String, (i64, String)>>,
@@ -163,7 +163,7 @@ pub struct RecentPhp {
 impl RecentPhp {
     pub const KEEP_S: i64 = 7 * 86400;
 
-    /// Datei-Ereignis aufnehmen (nur angelegte/umbenannte PHP-Dateien in Web-Verzeichnissen)
+    /// Record a file event (only created/renamed PHP files in web directories)
     pub fn note(&self, path: &str, comm: &str) {
         if !is_php(path) || !(path.starts_with("/var/www/") || path.starts_with("/srv/") || path.starts_with("/home/")) {
             return;
@@ -173,13 +173,13 @@ impl RecentPhp {
             let cut = now_s() - Self::KEEP_S;
             f.retain(|_, (t, _)| *t > cut);
             if f.len() >= 20_000 {
-                return; // z. B. große Deploys ohne Markierung – Speicher begrenzen
+                return; // e.g. large deploys without a marker – limit memory
             }
         }
         f.insert(path.to_string(), (now_s(), comm.to_string()));
     }
 
-    /// Passt der URL-Pfad (Ende des Dateipfads) zu einer neu angelegten Datei?
+    /// Does the URL path (end of the file path) match a newly created file?
     pub fn find(&self, url_path: &str) -> Option<(String, i64, String)> {
         if !is_php(url_path) || url_path.len() < 5 {
             return None;
@@ -211,36 +211,36 @@ impl RecentPhp {
     }
 }
 
-/// Ergebnis der Auswertung einer Zeile.
+/// Result of evaluating a line.
 #[derive(Debug)]
 pub enum Out {
     Detect(Detection),
     Login(LoginEvent),
 }
 
-/// Auswertung über alle Logs hinweg (Fehlversuche je IP, Entdopplung, Begrenzung).
+/// Evaluation across all logs (failed attempts per IP, deduplication, limiting).
 pub struct Analyzer {
     recent: Arc<RecentPhp>,
-    /// Webroots aus der Webserver-Konfiguration; leer = unbekannt (dann wird nicht geprüft)
+    /// Webroots from the web server configuration; empty = unknown (then no check is done)
     pub roots: Vec<String>,
-    /// Webroot → Domain(s) aus `server_name`/`ServerName` bzw. Plesk-Ordnername
+    /// Webroot → domain(s) from `server_name`/`ServerName` or the Plesk directory name
     pub sites: HashMap<String, String>,
     logins: tyrosd_source_auth::Aggregator,
     seen: HashMap<String, Instant>,
     budget: (Instant, u32),
-    /// Abklopfen durch Scanner (IP → (Anzahl, Pfad → Anzahl)), alle 10 min als Statistik gemeldet
+    /// Probing by scanners (IP → (count, path → count)), reported every 10 min as statistics
     probes: HashMap<String, (u32, HashMap<String, u32>)>,
     probes_since: Instant,
-    /// Apache-Module für /server-status und /server-info geladen? (status, info)
+    /// Apache modules for /server-status and /server-info loaded? (status, info)
     pub handlers: (bool, bool),
-    /// je Website: Größen der Ersatzseite, die für nicht vorhandene Adressen mit 200 ausgeliefert wird
+    /// per website: sizes of the fallback page served with 200 for non-existent addresses
     fallback: HashMap<String, Vec<u64>>,
-    /// Größen von 302-Antworten auf andere Anfragen als den Login, je Website/Log („leitet alles um“, z. B. Plugins,
-    /// die wp-login.php verbergen – Praxisfall: eine Website antwortet auf alles mit 302 → /)
+    /// Sizes of 302 responses to requests other than the login, per website/log ("redirects everything", e.g. plugins
+    /// that hide wp-login.php – real case: a website answers everything with 302 → /)
     redirects: HashMap<String, Vec<u64>>,
 }
 
-/// Lädt Apache mod_status / mod_info? Ohne Apache-Konfiguration (z. B. nur nginx) gibt es beide Seiten nicht.
+/// Does Apache load mod_status / mod_info? Without an Apache configuration (e.g. nginx only) neither page exists.
 pub fn apache_handlers() -> (bool, bool) {
     let mut h = (false, false);
     for d in ["/etc/apache2/mods-enabled", "/etc/httpd/conf.modules.d", "/etc/httpd/conf", "/etc/httpd/conf.d"] {
@@ -256,7 +256,7 @@ pub fn apache_handlers() -> (bool, bool) {
     h
 }
 
-/// Typische Scanner-Ziele, die nicht als „sensibel ausgeliefert“ zählen (Admin-Tools, Exploits bekannter Software)
+/// Typical scanner targets that do not count as "sensitive file served" (admin tools, exploits of well-known software)
 pub fn scanner_path(path: &str) -> bool {
     let l = path.to_ascii_lowercase();
     ["phpmyadmin", "/pma/", "/adminer", "/vendor/phpunit", "/cgi-bin/", "/boaform", "/actuator", "/hnap1", "/.aws", "/.ssh", "/.docker",
@@ -278,7 +278,7 @@ impl Analyzer {
     }
 
     fn once(&mut self, key: &str) -> bool {
-        // dieselbe Meldung höchstens einmal je Stunde; höchstens MAX_PER_MIN Meldungen je Minute
+        // the same report at most once per hour; at most MAX_PER_MIN reports per minute
         if self.seen.get(key).is_some_and(|t| t.elapsed() < Duration::from_secs(3600)) {
             return false;
         }
@@ -296,7 +296,7 @@ impl Analyzer {
         true
     }
 
-    /// Domain zum längsten passenden Webroot einer Datei
+    /// Domain for the longest matching webroot of a file
     fn site_for(&self, file: &str) -> Option<String> {
         self.sites
             .iter()
@@ -305,7 +305,7 @@ impl Analyzer {
             .map(|(_, n)| n.clone())
     }
 
-    /// Webroots und Domains übernehmen (aus `docroots()`)
+    /// Take over webroots and domains (from `docroots()`)
     pub fn set_sites(&mut self, sites: Vec<(String, String)>) {
         self.roots = sites.iter().map(|(r, _)| r.clone()).collect();
         self.roots.dedup();
@@ -319,26 +319,26 @@ impl Analyzer {
     pub fn feed(&mut self, r: &Req, log: &str) -> Vec<Out> {
         let mut out = Vec::new();
         let ok = (200..300).contains(&r.status);
-        let site = if r.vhost.is_empty() { String::new() } else { format!(" auf {}", r.vhost) };
+        let site = if r.vhost.is_empty() { String::new() } else { format!(" on {}", r.vhost) };
         let who = format!("{} {} {}{site} → {} ({})", r.ip, r.method, r.path, r.status, log);
 
-        // 0. Köder: geheime Adresse aufgerufen (Zugangsdaten aus der Köder-Datei benutzt) bzw. Köder-Datei abgerufen
+        // 0. Decoy: secret address requested (credentials from the decoy file used) or decoy file retrieved
         if let Some((d, secret)) = decoy_hit(&r.path) {
             if self.once(&format!("decoy|{}|{}|{secret}", d.id, r.ip)) {
                 out.push(if secret {
-                    Self::detection("decoy_url", "critical", "Köder-Adresse aufgerufen: Zugangsdaten aus der Köder-Datei benutzt",
+                    Self::detection("decoy_url", "critical", "Decoy address requested: credentials from the decoy file used",
                         format!("{who}
-Köder #{}", d.id), format!("decoy:{}", d.id))
+Decoy #{}", d.id), format!("decoy:{}", d.id))
                 } else {
-                    Self::detection("decoy_fetched", "low", "Köder-Datei über das Web abgerufen (Scanner)",
+                    Self::detection("decoy_fetched", "low", "Decoy file fetched via the web (scanner)",
                         format!("{who}
-Köder #{}", d.id), format!("decoy:{}", d.id))
+Decoy #{}", d.id), format!("decoy:{}", d.id))
                 });
             }
             return out;
         }
 
-        // 1. neu angelegte PHP-Datei wird aufgerufen
+        // 1. a newly created PHP file is requested
         if ok {
             if let Some((file, t, comm)) = self.recent.find(&r.path) {
                 if self.once(&format!("new_php|{file}|{}", r.ip)) {
@@ -347,24 +347,24 @@ Köder #{}", d.id), format!("decoy:{}", d.id))
                     out.push(Self::detection(
                         "web_new_php_accessed",
                         if by_web { "critical" } else { "high" },
-                        "Neu angelegte PHP-Datei wird aufgerufen (Webshell?)",
-                        format!("{who}\nDatei {file}, angelegt vor {age_h} h{}", if comm.is_empty() { String::new() } else { format!(" von {comm}") }),
+                        "Newly created PHP file is being requested (web shell?)",
+                        format!("{who}\nFile {file}, created {age_h} h ago{}", if comm.is_empty() { String::new() } else { format!(" by {comm}") }),
                         format!("{file}|{}", r.ip),
                     ));
                 }
             }
         }
-        // 2. POST auf PHP in Upload-/Medien-Ordnern
+        // 2. POST to PHP in upload/media directories
         if r.method == "POST" && ok && is_php(&r.path) && in_upload_dir(&r.path) && self.once(&format!("post_upload|{}|{}", r.path, r.ip)) {
-            out.push(Self::detection("web_post_php_upload_dir", "high", "POST auf PHP-Datei im Upload-Ordner", who.clone(), format!("{}|{}", r.path, r.ip)));
+            out.push(Self::detection("web_post_php_upload_dir", "high", "POST to a PHP file in the upload folder", who.clone(), format!("{}|{}", r.path, r.ip)));
         }
-        // 3. sensible Datei ausgeliefert – nur wenn sie wirklich auf der Platte liegt. Viele Anwendungen
-        //    (WordPress, Laravel, Shops) liefern für jede unbekannte Adresse die Startseite mit 200 aus;
-        //    das ist kein Datenleck.
+        // 3. sensitive file served – only if it really exists on disk. Many applications
+        //    (WordPress, Laravel, shops) serve the home page with 200 for every unknown address;
+        //    that is not a data leak.
         if r.status == 200 && r.size > 0 && matches!(r.method.as_str(), "GET" | "HEAD" | "POST") {
             if let Some(what) = sensitive(&r.path) {
-                // Statusseiten nur, wenn das Modul geladen ist und die Antwort nicht die übliche Ersatzseite
-                // der Website ist (Apps hinter Proxy beantworten jede Adresse mit ihrer Startseite)
+                // status pages only if the module is loaded and the response is not the website's usual
+                // fallback page (apps behind a proxy answer every address with their home page)
                 let handler = match r.path.as_str() {
                     "/server-status" => self.handlers.0,
                     "/server-info" => self.handlers.1,
@@ -374,15 +374,15 @@ Köder #{}", d.id), format!("decoy:{}", d.id))
                 let real = handler || file.is_some();
                 if !real && !self.roots.is_empty() {
                     self.note_fallback(r);
-                    self.probe(r); // kein echtes Datenleck: nur Statistik
+                    self.probe(r); // not a real data leak: statistics only
                 }
                 if (real || self.roots.is_empty()) && self.once(&format!("sensitive|{}|{}", r.vhost, r.path)) {
                     let mut d = format!("{what}\n");
-                    // Website: aus dem Log (vhost_combined), sonst aus der Konfiguration zum Webroot der Datei
+                    // website: from the log (vhost_combined), otherwise from the configuration for the file's webroot
                     let site = if !r.vhost.is_empty() {
                         Some(r.vhost.clone())
                     } else {
-                        file.as_ref().and_then(|(f, _)| self.site_for(f)).map(|n| format!("{n} (laut Webserver-Konfiguration)"))
+                        file.as_ref().and_then(|(f, _)| self.site_for(f)).map(|n| format!("{n} (according to the web server configuration)"))
                     };
                     if let Some(s) = &site {
                         d.push_str(&format!("Website: {s}\n"));
@@ -390,33 +390,33 @@ Köder #{}", d.id), format!("decoy:{}", d.id))
                     match &file {
                         Some((f, sz)) => {
                             let dir = f.rsplit_once('/').map(|(d, _)| d).filter(|d| !d.is_empty()).unwrap_or("/");
-                            d.push_str(&format!("Datei auf dem Server: {f} ({sz} Bytes)\nVerzeichnis: {dir}\n"));
+                            d.push_str(&format!("File on the server: {f} ({sz} bytes)\nDirectory: {dir}\n"));
                         }
-                        None if !handler => d.push_str("Datei auf dem Server: nicht geprüft (Webroot unbekannt)\n"),
+                        None if !handler => d.push_str("File on the server: not checked (web root unknown)\n"),
                         None => {}
                     }
-                    d.push_str(&format!("Anfrage: {} {} → {}, {} Bytes ausgeliefert\n", r.method, r.path, r.status, r.size));
-                    d.push_str(&format!("Von: {}\nLog: {log}", r.ip));
+                    d.push_str(&format!("Request: {} {} → {}, {} bytes served\n", r.method, r.path, r.status, r.size));
+                    d.push_str(&format!("From: {}\nLog: {log}", r.ip));
                     out.push(Self::detection(
                         "web_sensitive_file_served",
                         if real { "high" } else { "medium" },
-                        "Sensible Datei öffentlich ausgeliefert",
+                        "Sensitive file served publicly",
                         d,
                         format!("{}|{}", r.vhost, r.path),
                     ));
                 }
             }
         }
-        // Abklopfen: Scanner-Pfade und nicht vorhandene PHP-Dateien (4xx) zählen nur für die Statistik
+        // Probing: scanner paths and non-existent PHP files (4xx) count only for the statistics
         if (400..500).contains(&r.status) && sensitive(&r.path).is_none() && (scanner_path(&r.path) || (r.status == 404 && is_php(&r.path))) {
             self.probe(r);
         } else if (400..500).contains(&r.status) && sensitive(&r.path).is_some() {
             self.probe(r);
         }
-        // 4. WordPress-Login: POST wp-login.php → 302 = Erfolg, 200 = falsches Passwort; xmlrpc = Versuch.
-        // Ausnahme: Die Website leitet auch andere Anfragen mit einer gleich großen 302-Antwort um – dann ist das 302 des
-        // Logins keine Anmeldung, sondern die allgemeine Umleitung (zählt als Versuch). WordPress selbst leitet nach
-        // erfolgreicher Anmeldung mit leerem Inhalt um.
+        // 4. WordPress login: POST wp-login.php → 302 = success, 200 = wrong password; xmlrpc = attempt.
+        // Exception: the website also redirects other requests with an equally sized 302 response – then the login's 302
+        // is not a login but the general redirect (counts as an attempt). WordPress itself redirects with an empty body
+        // after a successful login.
         let lp = r.path.to_ascii_lowercase();
         let wp_login = lp.ends_with("/wp-login.php") && r.method == "POST" && (r.query.is_empty() || r.query.contains("action=login"));
         let xmlrpc = lp.ends_with("/xmlrpc.php") && r.method == "POST";
@@ -465,14 +465,14 @@ Köder #{}", d.id), format!("decoy:{}", d.id))
         }
     }
 
-    /// Antwortgröße entspricht der Ersatzseite dieser Website (±64 Bytes, z. B. wechselnder CSRF-Token)
+    /// Response size matches this website's fallback page (±64 bytes, e.g. changing CSRF token)
     fn is_fallback(&self, r: &Req) -> bool {
         self.fallback.get(&r.vhost).is_some_and(|v| v.iter().any(|s| s.abs_diff(r.size) <= 64))
     }
 
     fn probe(&mut self, r: &Req) {
         if self.probes.len() >= 5000 && !self.probes.contains_key(&r.ip) {
-            return; // Speicher begrenzen
+            return; // limit memory
         }
         let e = self.probes.entry(r.ip.clone()).or_default();
         e.0 += 1;
@@ -481,7 +481,7 @@ Köder #{}", d.id), format!("decoy:{}", d.id))
         }
     }
 
-    /// Statistik der letzten 10 Minuten (Schwere „info“: die Zentrale macht keinen Alarm daraus)
+    /// Statistics of the last 10 minutes (severity "info": the server does not raise an alarm from it)
     fn probe_stats(&mut self, force: bool) -> Option<Out> {
         if self.probes.is_empty() || (!force && self.probes_since.elapsed() < Duration::from_secs(600)) {
             return None;
@@ -501,7 +501,7 @@ Köder #{}", d.id), format!("decoy:{}", d.id))
             })
             .collect();
         let detail = serde_json::json!({ "window_s": window, "total": total, "ips": list }).to_string();
-        Some(Self::detection("web_probes", "info", "Abklopfen durch Scanner", detail, format!("probes|{}", now_s())))
+        Some(Self::detection("web_probes", "info", "Scanner probing", detail, format!("probes|{}", now_s())))
     }
 
     pub fn flush(&mut self, force: bool) -> Vec<Out> {
@@ -511,7 +511,7 @@ Köder #{}", d.id), format!("decoy:{}", d.id))
     }
 }
 
-/// URL-Pfad in den Webroots suchen → (Dateipfad, Größe). Nur echte Dateien, kein „..“.
+/// Look up a URL path in the webroots → (file path, size). Only real files, no "..".
 pub fn locate(roots: &[String], url_path: &str) -> Option<(String, u64)> {
     let rel = url_path.trim_start_matches('/');
     if rel.is_empty() || rel.split('/').any(|c| c == ".." || c == ".") {
@@ -524,7 +524,7 @@ pub fn locate(roots: &[String], url_path: &str) -> Option<(String, u64)> {
     })
 }
 
-/// Webroots mit Domain(s) aus nginx-/Apache-Konfiguration und Panel-Standardpfaden → [(Webroot, Domains)].
+/// Webroots with domain(s) from nginx/Apache configuration and panel default paths → [(webroot, domains)].
 pub fn docroots() -> Vec<(String, String)> {
     let mut files = Vec::new();
     for d in ["/etc/nginx/sites-enabled", "/etc/nginx/conf.d", "/etc/apache2/sites-enabled", "/etc/httpd/conf.d", "/etc/httpd/sites-enabled"] {
@@ -547,20 +547,20 @@ pub fn docroots() -> Vec<(String, String)> {
     }
     out.push(("/var/www/html".into(), String::new()));
     out.retain(|(p, _)| std::path::Path::new(p).is_dir());
-    // gleicher Webroot mehrfach: Eintrag mit Domain bevorzugen
+    // the same webroot several times: prefer the entry with a domain
     out.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.len().cmp(&a.1.len())));
     out.dedup_by(|a, b| a.0 == b.0);
     out.truncate(500);
     out
 }
 
-/// Nur die Webroots (für Tests und einfache Aufrufer)
+/// Only the webroots (for tests and simple callers)
 pub fn parse_roots(conf: &str) -> Vec<String> {
     parse_sites(conf).into_iter().map(|(r, _)| r).collect()
 }
 
-/// Je `server { … }` (nginx) bzw. `<VirtualHost>` (Apache): `root`/`DocumentRoot` mit `server_name`/`ServerName`/`ServerAlias`.
-/// Pfade mit Variablen und Platzhalter-Namen (`_`, `localhost`) werden übergangen.
+/// Per `server { … }` (nginx) or `<VirtualHost>` (Apache): `root`/`DocumentRoot` with `server_name`/`ServerName`/`ServerAlias`.
+/// Paths with variables and placeholder names (`_`, `localhost`) are skipped.
 pub fn parse_sites(conf: &str) -> Vec<(String, String)> {
     fn flush(roots: &mut Vec<String>, names: &mut Vec<String>, out: &mut Vec<(String, String)>) {
         let n = names.join(", ");
@@ -596,7 +596,7 @@ pub fn parse_sites(conf: &str) -> Vec<(String, String)> {
     out
 }
 
-/// Access-Logs finden: Standardpfade der Distributionen und gängiger Panels.
+/// Find access logs: default paths of the distributions and common panels.
 pub fn discover() -> Vec<String> {
     let mut out = Vec::new();
     let mut add_dir = |dir: &str, pred: &dyn Fn(&str) -> bool| {
@@ -632,7 +632,7 @@ pub fn discover() -> Vec<String> {
     out
 }
 
-/// Eine überwachte Logdatei (folgt Logrotation über Inode-Wechsel und Kürzung).
+/// A monitored log file (follows log rotation via inode change and truncation).
 struct Tail {
     path: String,
     file: std::fs::File,
@@ -640,16 +640,35 @@ struct Tail {
     pending: Vec<u8>,
 }
 
+/// Open a log file safely: regular files only (no FIFOs/devices – a FIFO would make the analysis hang), non-
+/// blocking; if the file is in a directory writable by others than root (e.g. per-website logs or a
+/// log directory owned by the web server user), a symlink as the last path component is not followed – otherwise
+/// that user could replace `access.log` with a link to a root file. Symlinks created by the admin in
+/// root-owned directories remain allowed.
+fn open_log(path: &str) -> Option<std::fs::File> {
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let dir = std::path::Path::new(path).parent()?;
+    let dm = std::fs::metadata(dir).ok()?;
+    let untrusted = dm.uid() != 0 || dm.mode() & 0o022 != 0;
+    let mut flags = libc::O_NONBLOCK;
+    if untrusted {
+        flags |= libc::O_NOFOLLOW;
+    }
+    let file = std::fs::OpenOptions::new().read(true).custom_flags(flags).open(path).ok()?;
+    file.metadata().ok().filter(|m| m.is_file())?;
+    Some(file)
+}
+
 impl Tail {
     fn open(path: &str) -> Option<Tail> {
         use std::os::unix::fs::MetadataExt;
-        let mut file = std::fs::File::open(path).ok()?;
+        let mut file = open_log(path)?;
         file.seek(SeekFrom::End(0)).ok()?;
         let ino = file.metadata().ok()?.ino();
         Some(Tail { path: path.to_string(), file, ino, pending: Vec::new() })
     }
 
-    /// Neue vollständige Zeilen (höchstens 4 MB je Aufruf, damit eine Datei nicht alles blockiert)
+    /// New complete lines (at most 4 MB per call, so that one file does not block everything)
     fn lines(&mut self) -> Vec<String> {
         use std::os::unix::fs::MetadataExt;
         let mut buf = vec![0u8; 64 * 1024];
@@ -666,8 +685,8 @@ impl Tail {
         if total == 0 {
             if let Ok(m) = std::fs::metadata(&self.path) {
                 if m.ino() != self.ino || m.len() < self.file.stream_position().unwrap_or(0) {
-                    if let Ok(nf) = std::fs::File::open(&self.path) {
-                        self.file = nf; // rotiert: neue Datei von vorn
+                    if let Some(nf) = open_log(&self.path) {
+                        self.file = nf; // rotated: new file from the start
                         self.ino = m.ino();
                         self.pending.clear();
                     }
@@ -682,13 +701,13 @@ impl Tail {
             }
         }
         if self.pending.len() > 64 * 1024 {
-            self.pending.clear(); // überlange Zeile ohne Umbruch verwerfen
+            self.pending.clear(); // discard an overlong line without a line break
         }
         out
     }
 }
 
-/// Logs auswerten bis `stop`; `emit` erhält Befunde und Login-Ereignisse.
+/// Analyze logs until `stop`; `emit` receives findings and login events.
 pub fn run(stop: Arc<AtomicBool>, recent: Arc<RecentPhp>, emit: impl Fn(Out)) {
     let mut az = Analyzer::new(recent);
     let mut tails: HashMap<String, Tail> = HashMap::new();
@@ -743,7 +762,7 @@ mod tests {
         assert!(matches!(&out[..], [Out::Detect(d)] if d.rule == "decoy_url" && d.severity == "critical" && d.key == "decoy:7"));
         let out = az.feed(&req("/.env.backup"), "nginx/access.log");
         assert!(matches!(&out[..], [Out::Detect(d)] if d.rule == "decoy_fetched"));
-        // ähnlicher, aber anderer Pfad: kein Treffer
+        // similar but different path: no hit
         assert!(decoy_hit("/admin-backup-7f3a9").is_none());
         set_decoys(Vec::new());
     }
@@ -761,8 +780,8 @@ mod tests {
         assert_eq!((v.vhost.as_str(), v.ip.as_str(), v.status), ("shop.example", "2001:db8::7", 302));
         let c = parse_line(r#"198.51.100.1 - - [15/Nov/2026:10:00:00 +0100] "GET /a%20b.php HTTP/1.0" 404 -"#).unwrap();
         assert_eq!((c.path.as_str(), c.size), ("/a b.php", 0));
-        assert!(parse_line("kaputt").is_none());
-        assert!(parse_line(r#"1.2.3.4 - - [x] "\x16\x03\x01" 400 0 "-" "-""#).is_none()); // TLS auf HTTP-Port
+        assert!(parse_line("broken").is_none());
+        assert!(parse_line(r#"1.2.3.4 - - [x] "\x16\x03\x01" 400 0 "-" "-""#).is_none()); // TLS on an HTTP port
     }
 
     #[test]
@@ -771,7 +790,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let mut a = Analyzer::new(Arc::new(RecentPhp::default()));
         a.set_sites(vec![(root.to_string_lossy().into_owned(), String::new())]);
-        for p in ["/.env", "/phpmyadmin/index.php", "/gibtsnicht.php", "/.git/config"] {
+        for p in ["/.env", "/phpmyadmin/index.php", "/does-not-exist.php", "/.git/config"] {
             let st = if p == "/.env" { 200 } else { 404 };
             let r = parse_line(&format!(r#"91.92.93.20 - - [15/Nov/2026:10:00:00 +0100] "GET {p} HTTP/1.1" {st} 900 "-" "x""#)).unwrap();
             assert!(a.feed(&r, "l").is_empty(), "{p}");
@@ -779,11 +798,11 @@ mod tests {
         let ok = parse_line(r#"91.92.93.20 - - [15/Nov/2026:10:00:00 +0100] "GET /index.php HTTP/1.1" 200 900 "-" "x""#).unwrap();
         assert!(a.feed(&ok, "l").is_empty());
         let out = a.flush(true);
-        let Some(Out::Detect(d)) = out.first() else { panic!("keine Statistik") };
+        let Some(Out::Detect(d)) = out.first() else { panic!("no statistics") };
         assert_eq!((d.rule.as_str(), d.severity.as_str()), ("web_probes", "info"));
         let v: serde_json::Value = serde_json::from_str(&d.detail).unwrap();
         assert_eq!((v["total"].as_u64(), v["ips"][0]["ip"].as_str(), v["ips"][0]["n"].as_u64()), (Some(4), Some("91.92.93.20"), Some(4)));
-        assert!(a.flush(true).is_empty()); // zurückgesetzt
+        assert!(a.flush(true).is_empty()); // reset
         std::fs::remove_dir_all(&root).ok();
     }
 
@@ -816,16 +835,16 @@ mod tests {
     fn webshell_access_and_dedupe() {
         let recent = Arc::new(RecentPhp::default());
         recent.note("/var/www/blog/wp-content/uploads/2026/11/x.php", "php-fpm8.2");
-        recent.note("/var/www/blog/readme.txt", "vim"); // keine PHP-Datei
+        recent.note("/var/www/blog/readme.txt", "vim"); // not a PHP file
         let mut a = Analyzer::new(recent.clone());
         let r = parse_line(COMBINED).unwrap();
         let out = a.feed(&r, "nginx/access.log");
         let d: Vec<_> = out.iter().filter_map(|o| if let Out::Detect(d) = o { Some(d) } else { None }).collect();
         assert_eq!(d.len(), 1);
-        assert_eq!((d[0].rule.as_str(), d[0].severity.as_str()), ("web_new_php_accessed", "critical")); // vom Webserver angelegt
+        assert_eq!((d[0].rule.as_str(), d[0].severity.as_str()), ("web_new_php_accessed", "critical")); // by the web server
         assert!(d[0].detail.contains("/var/www/blog/wp-content/uploads/2026/11/x.php"));
-        assert!(a.feed(&r, "nginx/access.log").is_empty()); // gleiche IP + Datei: einmal je Stunde
-        // 404 auf dieselbe Datei: nichts
+        assert!(a.feed(&r, "nginx/access.log").is_empty()); // same IP + file: once per hour
+        // 404 on the same file: nothing
         let mut r404 = r.clone();
         r404.status = 404;
         r404.ip = "198.51.100.2".into();
@@ -837,15 +856,15 @@ mod tests {
         let root = std::env::temp_dir().join(format!("si-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let line = |p: &str, sz: u32| parse_line(&format!(r#"91.92.93.30 - - [16/Nov/2026:14:52:38 +0100] "GET {p} HTTP/1.1" 200 {sz} "-" "x""#)).unwrap();
-        // Praxisfall: mod_info nicht geladen, App hinter Proxy liefert überall ihre Seite
+        // Real case: mod_info not loaded, app behind a proxy serves its page everywhere
         let mut a = Analyzer::new(Arc::new(RecentPhp::default()));
         a.roots = vec![root.to_string_lossy().into_owned()];
         a.handlers = (true, false);
         assert!(a.feed(&line("/server-info", 2779), "l").is_empty());
-        // mod_status geladen, aber Antwort so groß wie die Ersatzseite zuvor (/sendgrid.env)
+        // mod_status loaded, but the response is as large as the fallback page before (/sendgrid.env)
         assert!(a.feed(&line("/sendgrid.env", 2776), "l").is_empty());
         assert!(a.feed(&line("/server-status", 2779), "l").is_empty());
-        // echte Statusseite: Modul geladen, andere Größe → Alarm
+        // real status page: module loaded, different size → alarm
         let mut b = Analyzer::new(Arc::new(RecentPhp::default()));
         b.roots = a.roots.clone();
         b.handlers = (true, true);
@@ -859,25 +878,25 @@ mod tests {
         let p = parse_line(r#"203.0.113.9 - - [15/Nov/2026:10:00:00 +0100] "POST /images/cache/a.php HTTP/1.1" 200 33 "-" "x""#).unwrap();
         assert!(matches!(&a.feed(&p, "l")[..], [Out::Detect(d)] if d.rule == "web_post_php_upload_dir"));
         let e = parse_line(r#"203.0.113.9 - - [15/Nov/2026:10:00:00 +0100] "GET /.env HTTP/1.1" 200 900 "-" "x""#).unwrap();
-        // Webroot unbekannt: melden, aber nur „mittel“
+        // webroot unknown: report, but only "medium"
         assert!(matches!(&a.feed(&e, "l")[..], [Out::Detect(d)] if d.rule == "web_sensitive_file_served" && d.severity == "medium"));
-        // Webroot bekannt: nur wenn die Datei existiert, dann mit Pfad
+        // webroot known: only if the file exists, then with path
         let root = std::env::temp_dir().join(format!("wr-{}", std::process::id()));
         std::fs::create_dir_all(root.join(".git")).unwrap();
         std::fs::write(root.join(".git/config"), "[core]").unwrap();
         let mut b = Analyzer::new(Arc::new(RecentPhp::default()));
         b.roots = vec![root.to_string_lossy().into_owned()];
-        assert!(b.feed(&e, "l").is_empty()); // .env gibt es nicht → Startseite als Fallback, kein Alarm
+        assert!(b.feed(&e, "l").is_empty()); // .env does not exist → home page as fallback, no alarm
         let g = parse_line(r#"203.0.113.9 - - [15/Nov/2026:10:00:00 +0100] "GET /.git/config HTTP/1.1" 200 6 "-" "x""#).unwrap();
         let out = b.feed(&g, "nginx/access.log");
-        assert!(matches!(&out[..], [Out::Detect(d)] if d.severity == "high" && d.detail.contains("/.git/config (6 Bytes)")));
-        // Domain aus der Konfiguration + Verzeichnis im Beleg
+        assert!(matches!(&out[..], [Out::Detect(d)] if d.severity == "high" && d.detail.contains("/.git/config (6 bytes)")));
+        // domain from the configuration + directory in the evidence
         let mut c = Analyzer::new(Arc::new(RecentPhp::default()));
         c.set_sites(vec![(root.to_string_lossy().into_owned(), "shop.example".into())]);
         let out = c.feed(&g, "nginx/access.log");
         let Out::Detect(d) = &out[0] else { panic!() };
-        assert!(d.detail.contains("Website: shop.example (laut Webserver-Konfiguration)\n"), "{}", d.detail);
-        assert!(d.detail.contains(&format!("Verzeichnis: {}/.git\n", root.to_string_lossy())), "{}", d.detail);
+        assert!(d.detail.contains("Website: shop.example (according to the web server configuration)\n"), "{}", d.detail);
+        assert!(d.detail.contains(&format!("Directory: {}/.git\n", root.to_string_lossy())), "{}", d.detail);
         let t = parse_line(r#"203.0.113.9 - - [15/Nov/2026:10:00:00 +0100] "GET /../etc/passwd.sql HTTP/1.1" 200 6 "-" "x""#).unwrap();
         assert!(b.feed(&t, "l").is_empty());
         std::fs::remove_dir_all(&root).ok();
@@ -898,7 +917,7 @@ mod tests {
         assert_eq!(l.len(), 2);
         assert_eq!((l[0].success, l[0].count, l[0].service.as_str()), (false, 30, "wordpress"));
         assert!(l[1].success && l[1].user == "shop.example");
-        // Website leitet alles gleich um (302, ~5450 Bytes): 302 auf wp-login.php ist dann kein Erfolg
+        // website redirects everything the same way (302, ~5450 bytes): a 302 on wp-login.php is then not a success
         let mut b = Analyzer::new(Arc::new(RecentPhp::default()));
         let x = parse_line(r#"91.92.93.9 - - [21/Nov/2026:01:49:09 +0100] "POST /xmlrpc.php HTTP/1.1" 302 5451 "-" "x""#).unwrap();
         let w = parse_line(r#"91.92.93.9 - - [21/Nov/2026:01:49:10 +0100] "POST /wp-login.php HTTP/1.1" 302 5450 "-" "x""#).unwrap();
@@ -906,9 +925,32 @@ mod tests {
         b.feed(&w, "www_at_access.log");
         let l: Vec<_> = b.flush(true).into_iter().filter_map(|o| if let Out::Login(l) = o { Some(l) } else { None }).collect();
         assert!(!l.is_empty() && l.iter().all(|l| !l.success), "{l:?}");
-        // GET auf wp-login.php (Formular) zählt nicht
+        // GET on wp-login.php (form) does not count
         let get = parse_line(r#"203.0.113.9 - - [15/Nov/2026:10:00:00 +0100] "GET /wp-login.php HTTP/1.1" 200 4000 "-" "x""#).unwrap();
         assert!(a.feed(&get, "l").is_empty() && a.flush(true).is_empty());
+    }
+
+    #[test]
+    fn log_open_refuses_fifo_and_symlinks_in_writable_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("weblog-open-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap(); // writable by everyone
+        let real = dir.join("real.log");
+        std::fs::write(&real, "x\n").unwrap();
+        assert!(open_log(real.to_str().unwrap()).is_some(), "regular file");
+        let secret = std::env::temp_dir().join(format!("weblog-secret-{}", std::process::id()));
+        std::fs::write(&secret, "secret\n").unwrap();
+        let link = dir.join("access.log");
+        std::os::unix::fs::symlink(&secret, &link).unwrap();
+        assert!(open_log(link.to_str().unwrap()).is_none(), "symlink in a writable directory");
+        let fifo = dir.join("fifo.log");
+        let c = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o644) }, 0);
+        assert!(open_log(fifo.to_str().unwrap()).is_none(), "FIFO does not block and is rejected");
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_file(&secret).ok();
     }
 
     #[test]
@@ -916,17 +958,17 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("weblog-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("access.log");
-        std::fs::write(&p, "alt\n").unwrap();
+        std::fs::write(&p, "old\n").unwrap();
         let mut t = Tail::open(p.to_str().unwrap()).unwrap();
         use std::io::Write;
-        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(b"eins\nzw").unwrap();
-        assert_eq!(t.lines(), vec!["eins"]);
-        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(b"ei\n\xff\xfe kaputt\n").unwrap();
+        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(b"one\ntw").unwrap();
+        assert_eq!(t.lines(), vec!["one"]);
+        std::fs::OpenOptions::new().append(true).open(&p).unwrap().write_all(b"o\n\xff\xfe broken\n").unwrap();
         assert_eq!(t.lines().len(), 2);
         std::fs::rename(&p, dir.join("access.log.1")).unwrap();
-        std::fs::write(&p, "neu\n").unwrap();
-        assert!(t.lines().is_empty()); // erkennt Rotation …
-        assert_eq!(t.lines(), vec!["neu"]); // … und liest die neue Datei von vorn
+        std::fs::write(&p, "new\n").unwrap();
+        assert!(t.lines().is_empty()); // detects rotation …
+        assert_eq!(t.lines(), vec!["new"]); // … and reads the new file from the start
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -934,7 +976,7 @@ mod tests {
     fn recent_php_persistence() {
         let r = RecentPhp::default();
         r.note("/var/www/a/x.php", "php-fpm");
-        r.note("/etc/x.php", "vim"); // kein Web-Verzeichnis
+        r.note("/etc/x.php", "vim"); // not a web directory
         let f = std::env::temp_dir().join(format!("recent-{}.json", std::process::id()));
         r.save(f.to_str().unwrap());
         let r2 = RecentPhp::default();

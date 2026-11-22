@@ -1,24 +1,24 @@
-//! Sichere Git-Prüfung ohne das Git-Programm: `git status` als root führte
-//! Befehle aus der Repository-Konfiguration aus (core.fsmonitor, Filter über .gitattributes, Hooks). Hier wird nur
-//! `.git/index` (DIRC v2/v3/v4) gelesen und mit dem Arbeitsverzeichnis verglichen:
-//! - keine Konfiguration, keine Hooks, keine Filter/Attribute ausgewertet, kein Objektspeicher gelesen,
-//! - `.git` und `.git/index` ohne Symlinks geöffnet (O_NOFOLLOW), Index höchstens 64 MiB, Prüfsumme geprüft,
-//! - Dateien des Arbeitsverzeichnisses Teil für Teil ohne Symlinks geöffnet (ein Symlink-Ordner zählt wie bei Git
-//!   als „gelöscht“), nur reguläre Dateien gehasht, Pfade mit `..`/`.git`/leeren Teilen übersprungen,
-//! - Größe/mtime gleich und nicht „racy“ → unverändert; sonst SHA-1 von `blob <len>\0<inhalt>` gegen den Index.
+//! Safe Git check without the git program: `git status` as root used to run
+//! commands from the repository configuration (core.fsmonitor, filters via .gitattributes, hooks). Here only
+//! `.git/index` (DIRC v2/v3/v4) is read and compared with the working tree:
+//! - no configuration, no hooks, no filters/attributes evaluated, no object store read,
+//! - `.git` and `.git/index` opened without symlinks (O_NOFOLLOW), index at most 64 MiB, checksum verified,
+//! - working-tree files opened component by component without symlinks (a symlinked directory counts, as in Git,
+//!   as "deleted"), only regular files hashed, paths with `..`/`.git`/empty components skipped,
+//! - size/mtime equal and not "racy" → unchanged; otherwise SHA-1 of `blob <len>\0<content>` against the index.
 //!
-//! Erkennt geänderte und gelöschte versionierte Dateien. Nicht versionierte Dateien bleiben außen vor (dafür müsste
-//! .gitignore ausgewertet werden). Repositories mit Inhaltsfiltern (Git LFS, Zeilenende-Umwandlung) können nach
-//! Kopien mit neuer mtime als „geändert“ erscheinen – das Ergebnis trägt dann einen Hinweis.
+//! Detects modified and deleted tracked files. Untracked files are left out (that would require evaluating
+//! .gitignore). Repositories with content filters (Git LFS, line-ending conversion) may appear "modified" after
+//! copies with a new mtime – the result then carries a note.
 
 use std::ffi::CString;
 use std::io::Read;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
 pub const MAX_INDEX: u64 = 64 << 20;
-/// größte Datei, die gehasht wird (größere mit abweichender Größe/mtime gelten als geändert, ohne Hash)
+/// largest file that is hashed (larger ones with differing size/mtime count as modified, without hashing)
 const MAX_HASH_FILE: u64 = 256 << 20;
-/// Hash-Budget je Repository
+/// hash budget per repository
 const MAX_HASH_TOTAL: u64 = 2 << 30;
 const MAX_ENTRIES: usize = 2_000_000;
 
@@ -30,7 +30,7 @@ pub struct Entry {
     pub mode: u32,
     pub size: u32,
     pub sha1: [u8; 20],
-    /// Konflikt-Stufe, skip-worktree, intent-to-add, assume-valid → nicht vergleichen
+    /// conflict stage, skip-worktree, intent-to-add, assume-valid → do not compare
     pub skip: bool,
 }
 
@@ -38,7 +38,7 @@ pub struct Entry {
 pub enum Change {
     Modified,
     Deleted,
-    /// Datei ↔ Symlink ↔ Ordner
+    /// file ↔ symlink ↔ directory
     TypeChanged,
 }
 
@@ -51,7 +51,7 @@ pub struct Status {
     pub budget_exhausted: bool,
 }
 
-// ---------------------------------------------------------------- SHA-1 (nur für Git-Blob-IDs)
+// ---------------------------------------------------------------- SHA-1 (only for Git blob IDs)
 
 pub struct Sha1 {
     h: [u32; 5],
@@ -103,7 +103,7 @@ impl Sha1 {
             self.len += n;
             data = &data[n..];
             if self.len < 64 {
-                return; // alles im Puffer
+                return; // everything in the buffer
             }
             let b = self.buf;
             self.block(&b);
@@ -140,7 +140,7 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
     s.finish()
 }
 
-/// Git-Blob-ID eines Inhalts: SHA-1 über `blob <len>\0<inhalt>`
+/// Git blob ID of some content: SHA-1 over `blob <len>\0<content>`
 pub fn blob_id(data: &[u8]) -> [u8; 20] {
     let mut s = Sha1::default();
     s.update(format!("blob {}\0", data.len()).as_bytes());
@@ -148,38 +148,38 @@ pub fn blob_id(data: &[u8]) -> [u8; 20] {
     s.finish()
 }
 
-// ---------------------------------------------------------------- Index lesen
+// ---------------------------------------------------------------- reading the index
 
 fn be32(b: &[u8], at: usize) -> Option<u32> {
     b.get(at..at + 4).map(|x| u32::from_be_bytes([x[0], x[1], x[2], x[3]]))
 }
 
-/// Pfad aus dem Index ist harmlos (relativ, keine leeren/./..-Teile, kein `.git`)
+/// path from the index is harmless (relative, no empty/./.. components, no `.git`)
 fn safe_rel(p: &str) -> bool {
     !p.is_empty() && !p.starts_with('/') && p.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && !c.eq_ignore_ascii_case(".git"))
 }
 
-/// Index (DIRC v2/v3/v4) parsen. Prüft die Prüfsumme am Ende (außer bei index.skipHash = lauter Nullen).
+/// Parse the index (DIRC v2/v3/v4). Verifies the trailing checksum (except with index.skipHash = all zeros).
 pub fn parse_index(data: &[u8]) -> Result<Vec<Entry>, String> {
     if data.len() < 12 + 20 || &data[..4] != b"DIRC" {
-        return Err("kein Git-Index".into());
+        return Err("not a Git index".into());
     }
     let (body, sum) = data.split_at(data.len() - 20);
     if sum.iter().any(|b| *b != 0) && sha1(body) != sum {
-        return Err("Prüfsumme des Index stimmt nicht".into());
+        return Err("index checksum mismatch".into());
     }
     let version = be32(data, 4).unwrap();
     if !(2..=4).contains(&version) {
-        return Err(format!("Index-Version {version} nicht unterstützt"));
+        return Err(format!("index version {version} not supported"));
     }
     let count = be32(data, 8).unwrap() as usize;
     if count > MAX_ENTRIES {
-        return Err("zu viele Einträge".into());
+        return Err("too many entries".into());
     }
     let mut out = Vec::with_capacity(count.min(100_000));
     let mut pos = 12;
     let mut prev: Vec<u8> = Vec::new();
-    let bad = || "Index beschädigt".to_string();
+    let bad = || "index corrupt".to_string();
     for _ in 0..count {
         let start = pos;
         let f = |i: usize| be32(body, start + i * 4).ok_or_else(bad);
@@ -187,7 +187,7 @@ pub fn parse_index(data: &[u8]) -> Result<Vec<Entry>, String> {
         let sha1: [u8; 20] = body.get(start + 40..start + 60).ok_or_else(bad)?.try_into().unwrap();
         let flags = u16::from_be_bytes(body.get(start + 60..start + 62).ok_or_else(bad)?.try_into().unwrap());
         pos = start + 62;
-        let mut skip = flags & 0x8000 != 0 || (flags >> 12) & 0x3 != 0; // assume-valid, Konflikt-Stufe
+        let mut skip = flags & 0x8000 != 0 || (flags >> 12) & 0x3 != 0; // assume-valid, conflict stage
         if flags & 0x4000 != 0 {
             if version < 3 {
                 return Err(bad());
@@ -197,7 +197,7 @@ pub fn parse_index(data: &[u8]) -> Result<Vec<Entry>, String> {
             pos += 2;
         }
         let name: Vec<u8> = if version == 4 {
-            // Präfix-Kompression: Varint (Anzahl Bytes, die vom vorigen Pfad entfernt werden), dann Rest bis NUL
+            // prefix compression: varint (number of bytes removed from the previous path), then the rest up to NUL
             let mut c = *body.get(pos).ok_or_else(bad)?;
             pos += 1;
             let mut strip = (c & 0x7f) as usize;
@@ -217,7 +217,7 @@ pub fn parse_index(data: &[u8]) -> Result<Vec<Entry>, String> {
         } else {
             let end = pos + body.get(pos..).ok_or_else(bad)?.iter().position(|b| *b == 0).ok_or_else(bad)?;
             let n = body[pos..end].to_vec();
-            // Eintrag auf 8 Bytes aufgefüllt (mindestens ein NUL)
+            // entry padded to 8 bytes (at least one NUL)
             pos = start + ((end - start + 8) & !7);
             n
         };
@@ -231,7 +231,7 @@ pub fn parse_index(data: &[u8]) -> Result<Vec<Entry>, String> {
     Ok(out)
 }
 
-// ---------------------------------------------------------------- Dateisystem (nur über Deskriptoren, ohne Symlinks)
+// ---------------------------------------------------------------- file system (only via descriptors, no symlinks)
 
 fn cstr(s: &str) -> Option<CString> {
     CString::new(s).ok()
@@ -239,13 +239,13 @@ fn cstr(s: &str) -> Option<CString> {
 
 fn openat(dir: &OwnedFd, name: &str, flags: i32) -> Option<OwnedFd> {
     let c = cstr(name)?;
-    // SAFETY: gültiger fd und C-String; Rückgabe geprüft
+    // SAFETY: valid fd and C string; return value checked
     let fd = unsafe { libc::openat(dir.as_raw_fd(), c.as_ptr(), flags | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
     (fd >= 0).then(|| unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 fn open_dir_abs(path: &str) -> Option<OwnedFd> {
-    // SAFETY: konstanter C-String
+    // SAFETY: constant C string
     let root = unsafe { libc::open(c"/".as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
     if root < 0 {
         return None;
@@ -259,14 +259,14 @@ fn open_dir_abs(path: &str) -> Option<OwnedFd> {
 
 fn fstat(fd: &OwnedFd) -> Option<libc::stat> {
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: gültiger fd, st beschreibbar
+    // SAFETY: valid fd, st writable
     (unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } == 0).then_some(st)
 }
 
 fn lstatat(dir: &OwnedFd, name: &str) -> Option<libc::stat> {
     let c = cstr(name)?;
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: gültiger fd und C-String
+    // SAFETY: valid fd and C string
     (unsafe { libc::fstatat(dir.as_raw_fd(), c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } == 0).then_some(st)
 }
 
@@ -274,26 +274,26 @@ fn is(st: &libc::stat, t: libc::mode_t) -> bool {
     st.st_mode & libc::S_IFMT == t
 }
 
-/// `.git/index` eines Arbeitsverzeichnisses lesen: `.git` muss ein echter Ordner sein (keine gitfile-Verweise,
-/// keine Symlinks), `index` eine reguläre Datei ≤ 64 MiB. → (Inhalt, mtime-Sekunden des Index)
+/// Read `.git/index` of a working tree: `.git` must be a real directory (no gitfile references,
+/// no symlinks), `index` a regular file ≤ 64 MiB. → (content, mtime seconds of the index)
 pub fn read_index(repo: &str) -> Result<(Vec<u8>, i64), String> {
-    let r = open_dir_abs(repo).ok_or("Repository-Ordner nicht sicher zu öffnen")?;
-    let git = openat(&r, ".git", libc::O_RDONLY | libc::O_DIRECTORY).ok_or(".git ist kein Ordner (oder ein Symlink)")?;
-    let idx = openat(&git, "index", libc::O_RDONLY | libc::O_NONBLOCK).ok_or("kein Index")?;
-    let st = fstat(&idx).ok_or("Index nicht lesbar")?;
+    let r = open_dir_abs(repo).ok_or("repository directory cannot be opened safely")?;
+    let git = openat(&r, ".git", libc::O_RDONLY | libc::O_DIRECTORY).ok_or(".git is not a directory (or is a symlink)")?;
+    let idx = openat(&git, "index", libc::O_RDONLY | libc::O_NONBLOCK).ok_or("no index")?;
+    let st = fstat(&idx).ok_or("index not readable")?;
     if !is(&st, libc::S_IFREG) || st.st_size as u64 > MAX_INDEX {
-        return Err("Index keine reguläre Datei oder zu groß".into());
+        return Err("index is not a regular file or too large".into());
     }
     let mut data = Vec::new();
     std::fs::File::from(idx).take(MAX_INDEX + 1).read_to_end(&mut data).map_err(|e| e.to_string())?;
     if data.len() as u64 > MAX_INDEX {
-        return Err("Index zu groß".into());
+        return Err("index too large".into());
     }
     Ok((data, st.st_mtime))
 }
 
-/// Datei im Arbeitsverzeichnis ohne Symlinks auflösen: (Elternordner-fd, lstat des Ziels) – None, wenn ein Teil fehlt
-/// oder ein Ordner-Teil kein echter Ordner ist (Git: „hinter einem symbolischen Link“ = gelöscht)
+/// Resolve a working-tree file without symlinks: (parent directory fd, lstat of the target) – None if a component is
+/// missing or a directory component is not a real directory (Git: "beyond a symbolic link" = deleted)
 fn locate(repo: &OwnedFd, rel: &str) -> Option<(OwnedFd, String, libc::stat)> {
     let parts: Vec<&str> = rel.split('/').collect();
     let (name, dirs) = parts.split_last()?;
@@ -333,7 +333,7 @@ fn hash_file(dir: &OwnedFd, name: &str, expect_size: u64) -> Option<[u8; 20]> {
 fn readlink_at(dir: &OwnedFd, name: &str) -> Option<Vec<u8>> {
     let c = cstr(name)?;
     let mut buf = vec![0u8; 4096];
-    // SAFETY: gültiger fd/C-String, Puffer beschreibbar
+    // SAFETY: valid fd/C string, buffer writable
     let n = unsafe { libc::readlinkat(dir.as_raw_fd(), c.as_ptr(), buf.as_mut_ptr().cast(), buf.len()) };
     (n >= 0).then(|| {
         buf.truncate(n as usize);
@@ -341,16 +341,16 @@ fn readlink_at(dir: &OwnedFd, name: &str) -> Option<Vec<u8>> {
     })
 }
 
-/// Arbeitsverzeichnis `repo` gegen seinen Index vergleichen
+/// Compare working tree `repo` against its index
 pub fn status(repo: &str) -> Result<Status, String> {
     let (data, index_mtime) = read_index(repo)?;
     let entries = parse_index(&data)?;
-    let r = open_dir_abs(repo).ok_or("Repository-Ordner nicht sicher zu öffnen")?;
+    let r = open_dir_abs(repo).ok_or("repository directory cannot be opened safely")?;
     let mut st = Status { entries: entries.len(), ..Default::default() };
     for e in &entries {
         let kind = e.mode & 0o170000;
         if e.skip || kind == 0o160000 || !safe_rel(&e.path) || !(kind == 0o100000 || kind == 0o120000) {
-            st.skipped += 1; // Submodule, Konflikte, ausgeblendete Einträge, verdächtige Pfade
+            st.skipped += 1; // submodules, conflicts, hidden entries, suspicious paths
             continue;
         }
         let Some((dir, name, s)) = locate(&r, &e.path) else {
@@ -370,7 +370,7 @@ pub fn status(repo: &str) -> Result<Status, String> {
             continue;
         }
         let size = s.st_size as u64;
-        // Index speichert die Größe auf 32 Bit gekürzt; Nanosekunden werden (wie bei Git ohne USE_NSEC) nicht verglichen
+        // the index stores the size truncated to 32 bits; nanoseconds are not compared (as in Git without USE_NSEC)
         let racy = e.mtime_s as i64 >= index_mtime;
         if size as u32 == e.size && s.st_mtime as u32 == e.mtime_s && !racy {
             continue;
@@ -391,7 +391,7 @@ pub fn status(repo: &str) -> Result<Status, String> {
     Ok(st)
 }
 
-/// Repository nutzt Inhaltsfilter/Zeilenende-Attribute (nur Text gelesen, nichts ausgewertet) – Hinweis für das Ergebnis
+/// repository uses content filters/line-ending attributes (text only read, nothing evaluated) – note for the result
 pub fn has_content_filters(repo: &str) -> bool {
     let Some(r) = open_dir_abs(repo) else { return false };
     let read = |dir: &OwnedFd, name: &str| -> Option<String> {
@@ -419,7 +419,7 @@ pub(crate) mod tests {
         b.iter().map(|x| format!("{x:02x}")).collect()
     }
 
-    /// Minimaler Index-Schreiber (v2/v3/v4) für Tests
+    /// Minimal index writer (v2/v3/v4) for tests
     pub fn write_index(version: u32, entries: &[Entry], ext_flags: &[u16]) -> Vec<u8> {
         let mut out = b"DIRC".to_vec();
         out.extend_from_slice(&version.to_be_bytes());
@@ -443,7 +443,7 @@ pub(crate) mod tests {
             if version == 4 {
                 let common = prev.bytes().zip(e.path.bytes()).take_while(|(a, b)| a == b).count();
                 let mut strip = prev.len() - common;
-                // Varint (Git-Offset-Kodierung)
+                // varint (Git offset encoding)
                 let mut v = vec![(strip & 0x7f) as u8];
                 while strip >= 0x80 {
                     strip = (strip >> 7) - 1;
@@ -476,7 +476,7 @@ pub(crate) mod tests {
             s.update(&[b'a'; 1000]);
         }
         assert_eq!(hex(&s.finish()), "34aa973cd4c4daa4f61eeb2bdbad27316534016f");
-        // Git-Blob-IDs (git hash-object)
+        // Git blob IDs (git hash-object)
         assert_eq!(hex(&blob_id(b"")), "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391");
         assert_eq!(hex(&blob_id(b"hello\n")), "ce013625030ba8dba906f756967f9e9ca394464a");
     }
@@ -499,7 +499,7 @@ pub(crate) mod tests {
             assert_eq!(parsed[2].mtime_s, 3);
             assert_eq!(parsed[3].skip, v >= 3);
         }
-        // beschädigt / falsche Prüfsumme / kein Index
+        // corrupt / wrong checksum / no index
         let mut d = write_index(2, &es, &[]);
         d[20] ^= 1;
         assert!(parse_index(&d).is_err());
@@ -529,24 +529,25 @@ pub(crate) mod tests {
                 std::fs::write(root.join(p), c).unwrap();
             }
         }
-        // „linked“ ist ein Symlink auf einen Ordner mit passender Datei → zählt als gelöscht (kein Folgen)
+        // "linked" is a symlink to a directory with a matching file → counts as deleted (not followed)
         std::fs::write(root.join("outside/a.php"), b"y").unwrap();
         std::os::unix::fs::symlink(root.join("outside"), root.join("linked")).unwrap();
         let mtime = |p: &str| std::fs::metadata(root.join(p)).map(|m| std::os::unix::fs::MetadataExt::mtime(&m) as u32).unwrap_or(1);
         let mut es: Vec<Entry> = files.iter().map(|(p, c)| entry(p, c, mtime(p))).collect();
-        // Datei verändert, Größe gleich, mtime gleich → würde ohne Hash übersehen; der Index ist aber „racy“ (gleiche Sekunde) → Hash
+        // file modified, same size, same mtime → would be missed without hashing; but the index is "racy"
+        // (same second) → hash
         std::fs::write(root.join("index.php"), b"<?php evil(1)\n").unwrap();
         es[0].mtime_s = mtime("index.php");
-        // anderer Inhalt anderer Größe
+        // different content of different size
         std::fs::write(root.join("wp-admin/admin.php"), b"<?php admin(); eval($_POST['x']);\n").unwrap();
-        // Symlink im Index, im Arbeitsverzeichnis eine Datei
+        // symlink in the index, a file in the working tree
         es.push(Entry { mode: 0o120000, ..entry("link.php", b"target.php", 1) });
         std::fs::write(root.join("link.php"), b"target.php").unwrap();
-        // Submodul wird übersprungen
+        // submodule is skipped
         es.push(Entry { mode: 0o160000, ..entry("sub", b"", 1) });
         let idx = root.join(".git/index");
         std::fs::write(&idx, write_index(2, &es, &[])).unwrap();
-        // Index in derselben Sekunde wie index.php geschrieben („racy“) – fest gesetzt, damit der Test nicht vom Takt abhängt
+        // index written in the same second as index.php ("racy") – fixed so the test does not depend on the clock
         let t = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(es[0].mtime_s as u64);
         std::fs::File::options().write(true).open(&idx).unwrap().set_modified(t).unwrap();
         let repo = root.to_string_lossy().into_owned();
@@ -560,10 +561,10 @@ pub(crate) mod tests {
             ("linked/a.php".to_string(), Change::Deleted),
             ("wp-admin/admin.php".to_string(), Change::Modified),
         ]);
-        assert_eq!(s.skipped, 2); // ../escape.php, Submodul
-        // unverändert (racy, aber gleicher Inhalt) → nicht gemeldet
+        assert_eq!(s.skipped, 2); // ../escape.php, submodule
+        // unchanged (racy, but same content) → not reported
         assert!(!ch.iter().any(|(p, _)| p == "same-stat.php"));
-        // .git als Symlink oder Index als Symlink → nicht gelesen
+        // .git as a symlink or index as a symlink → not read
         let d2 = tempfile::tempdir().unwrap();
         std::os::unix::fs::symlink(root.join(".git"), d2.path().join(".git")).unwrap();
         assert!(status(&d2.path().to_string_lossy()).is_err());
@@ -571,7 +572,7 @@ pub(crate) mod tests {
         std::fs::create_dir(d3.path().join(".git")).unwrap();
         std::os::unix::fs::symlink(root.join(".git/index"), d3.path().join(".git/index")).unwrap();
         assert!(status(&d3.path().to_string_lossy()).is_err());
-        // gitfile (Worktree/Submodul-Verweis) wird nicht verfolgt
+        // gitfile (worktree/submodule reference) is not followed
         let d4 = tempfile::tempdir().unwrap();
         std::fs::write(d4.path().join(".git"), format!("gitdir: {}/.git\n", repo)).unwrap();
         assert!(status(&d4.path().to_string_lossy()).is_err());
@@ -585,7 +586,7 @@ pub(crate) mod tests {
         std::fs::write(root.join("a.php"), b"<?php 1;").unwrap();
         let m = std::fs::metadata(root.join("a.php")).unwrap();
         let mt = std::os::unix::fs::MetadataExt::mtime(&m) as u32;
-        // Index mit falschem Hash, aber passender Größe/mtime und Index deutlich jünger → nicht gehasht, nicht gemeldet
+        // index with wrong hash, but matching size/mtime and index clearly newer → not hashed, not reported
         let e = Entry { sha1: [0; 20], ..entry("a.php", b"<?php 1;", mt) };
         let idx = root.join(".git/index");
         std::fs::write(&idx, write_index(2, &[e], &[])).unwrap();

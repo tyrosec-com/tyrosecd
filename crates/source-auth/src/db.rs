@@ -1,11 +1,11 @@
-//! Fehlanmeldungen an Datenbanken (Plan „Köder-Zugangsdaten“, Phase 2): PostgreSQL und MySQL/MariaDB.
+//! Failed logins to databases (plan "decoy credentials", phase 2): PostgreSQL and MySQL/MariaDB.
 //!
-//! Gemeldet werden nur **fehlgeschlagene** Anmeldungen mit Benutzername – die Zentrale gleicht sie mit den Köder-
-//! Benutzern ab (wer einen Köder-Benutzer kennt, hat die Köder-Datei gelesen). Andere Regeln laufen darauf nicht.
+//! Only **failed** logins with a user name are reported – the server matches them against the decoy
+//! users (whoever knows a decoy user has read the decoy file). No other rules run on them.
 //!
-//! Quellen: Journal der Datenbank-Units (Feld `_SYSTEMD_UNIT` setzt das Journal selbst) und die üblichen Protokoll-
-//! dateien. PostgreSQL protokolliert Fehlanmeldungen standardmäßig; MySQL 8 nur mit `log_error_verbosity = 3`,
-//! MariaDB mit `log_warnings ≥ 2` (Standard seit 10.2.4).
+//! Sources: journal of the database units (the journal sets the `_SYSTEMD_UNIT` field itself) and the usual log
+//! files. PostgreSQL logs failed logins by default; MySQL 8 only with `log_error_verbosity = 3`,
+//! MariaDB with `log_warnings ≥ 2` (default since 10.2.4).
 
 use std::sync::OnceLock;
 
@@ -33,12 +33,12 @@ fn re_mysql() -> &'static Regex {
 }
 
 fn event(service: &str, user: &str, host: &str) -> LoginEvent {
-    // nur IP-Adressen übernehmen (MySQL meldet auch „localhost“)
+    // only take IP addresses (MySQL also reports "localhost")
     let ip = host.parse::<std::net::IpAddr>().map(|a| a.to_string()).unwrap_or_default();
     LoginEvent { service: service.into(), success: false, user: user.into(), ip, method: "password".into(), count: 1, ..Default::default() }
 }
 
-/// Eine Zeile aus dem Protokoll einer Datenbank auswerten (`service`: postgresql | mysql)
+/// Evaluate a line from a database's log (`service`: postgresql | mysql)
 pub fn parse_line(service: &str, line: &str) -> Option<LoginEvent> {
     match service {
         "postgresql" => {
@@ -52,7 +52,7 @@ pub fn parse_line(service: &str, line: &str) -> Option<LoginEvent> {
     }
 }
 
-/// Dienst aus der systemd-Unit (vom Journal gesetzt)
+/// Service from the systemd unit (set by the journal)
 pub fn service_of_unit(unit: &str) -> Option<&'static str> {
     if unit.starts_with("postgresql") {
         Some("postgresql")
@@ -63,7 +63,7 @@ pub fn service_of_unit(unit: &str) -> Option<&'static str> {
     }
 }
 
-/// Protokolldateien (Debian/Ubuntu/RHEL-Standardorte), die es auf diesem Server gibt → (Pfad, Dienst)
+/// Log files (Debian/Ubuntu/RHEL default locations) that exist on this server → (path, service)
 pub fn log_files() -> Vec<(String, &'static str)> {
     let mut v = Vec::new();
     for p in ["/var/log/mysql/error.log", "/var/log/mariadb/mariadb.log", "/var/log/mysqld.log", "/var/log/mysql/mysqld.log"] {
@@ -71,7 +71,7 @@ pub fn log_files() -> Vec<(String, &'static str)> {
             v.push((p.to_string(), "mysql"));
         }
     }
-    // Debian/Ubuntu: /var/log/postgresql/postgresql-<version>-<cluster>.log (feste Namen, Logrotate behält sie)
+    // Debian/Ubuntu: /var/log/postgresql/postgresql-<version>-<cluster>.log (fixed names, logrotate keeps them)
     if let Ok(rd) = std::fs::read_dir("/var/log/postgresql") {
         for e in rd.flatten() {
             let n = e.file_name().to_string_lossy().into_owned();

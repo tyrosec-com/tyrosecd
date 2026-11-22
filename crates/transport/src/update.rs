@@ -1,17 +1,17 @@
-//! Selbst-Update (Hauptplan 12.4, Launch-Paket 25.3).
+//! Self-update (main plan 12.4, launch package 25.3).
 //!
-//! Sicherheit:
-//! - Installiert wird nur, was mit dem **Release-Schlüssel** signiert ist. Der
-//!   öffentliche Schlüssel ist im Binary eingebettet; der private liegt offline.
-//!   Die Zentrale kann nur „es gibt Version X unter URL Y“ melden.
-//! - Nur höhere Versionen (kein Downgrade auf eine verwundbare Version), und nur in
-//!   kleinen Schritten (gleiche Major-Version, höchstens eine Minor-Version weiter) –
-//!   ein Manifest „999.0.0“ kann den Agenten nicht dauerhaft festnageln.
-//! - Schlüssel-Epoche: ein Schlüssel niedrigerer Epoche als die höchste je angenommene
-//!   gilt als widerrufen (Rotation).
-//! - SHA-256 jeder Datei steht im signierten Manifest; das geladene Programm muss
-//!   selbst die Version des Manifests melden.
-//! - Atomarer Austausch; bei wiederholtem Fehlstart Rückkehr zur alten Version.
+//! Security:
+//! - Only what is signed with the **release key** is installed. The
+//!   public key is embedded in the binary; the private one is kept offline.
+//!   The central server can only report "there is version X at URL Y".
+//! - Only higher versions (no downgrade to a vulnerable version), and only in
+//!   small steps (same major version, at most one minor version ahead) –
+//!   a "999.0.0" manifest cannot pin the agent permanently.
+//! - Key epoch: a key with a lower epoch than the highest ever accepted
+//!   counts as revoked (rotation).
+//! - The SHA-256 of every file is in the signed manifest; the downloaded program must
+//!   itself report the manifest's version.
+//! - Atomic exchange; on repeated failed starts, return to the old version.
 
 use std::io::Read;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -20,31 +20,31 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
-/// Öffentlicher Release-Schlüssel (Ed25519, 694e09f0…852e). Der private Schlüssel liegt offline beim Herausgeber.
+/// Public release key (Ed25519, 694e09f0…852e). The private key is kept offline by the publisher.
 pub const RELEASE_PUBKEY: &[u8; 32] = include_bytes!("../release.pub");
-/// Vertrauenswürdige Release-Schlüssel (Rotation 16.11.2026): bisheriger Schlüssel (nur noch für den Übergang –
-/// laufende Agenten kennen nur ihn), neuer Hauptschlüssel 2026 und ein offline verwahrter Reserve-Schlüssel.
-/// Ab der nächsten Version wird nur noch mit „2026“ signiert; danach fällt der alte Schlüssel heraus.
+/// Trusted release keys (rotation 2026-11-16): the previous key (only for the transition –
+/// running agents only know this one), the new main key 2026 and a reserve key kept offline.
+/// From the next version on, signing uses only "2026"; after that the old key is dropped.
 pub const RELEASE_PUBKEYS: [&[u8; 32]; 3] =
     [RELEASE_PUBKEY, include_bytes!("../release-2026.pub"), include_bytes!("../release-reserve.pub")];
 
-/// Schlüssel-Epoche je eingebautem Schlüssel (gleiche Reihenfolge wie `RELEASE_PUBKEYS`): alt = 0, 2026 = 1,
-/// Reserve = 2. Der Agent merkt sich die höchste Epoche, die er je angenommen hat
-/// (`EPOCH_FILE` im Datenverzeichnis), und lehnt danach Manifeste ab, die mit einem Schlüssel niedrigerer Epoche
-/// signiert sind – ein exponierter alter Schlüssel ist damit widerrufen, sobald der Agent ein Manifest des neueren
-/// gesehen hat.
+/// Key epoch per built-in key (same order as `RELEASE_PUBKEYS`): old = 0, 2026 = 1,
+/// reserve = 2. The agent remembers the highest epoch it has ever accepted
+/// (`EPOCH_FILE` in the data directory) and afterwards rejects manifests signed with a key of a lower epoch
+/// – an exposed old key is thus revoked as soon as the agent has seen a manifest of the newer
+/// one.
 pub const RELEASE_KEY_EPOCHS: [u32; 3] = [0, 1, 2];
 
-/// Untergrenze der Schlüssel-Epoche, fest im Binary (anheben, sobald mit dem alten Schlüssel nicht mehr signiert wird)
+/// Lower bound of the key epoch, fixed in the binary (raise it once the old key is no longer used for signing)
 pub const MIN_KEY_EPOCH: u32 = 0;
 
-/// Datei im Datenverzeichnis mit der höchsten je angenommenen Schlüssel-Epoche
+/// File in the data directory with the highest key epoch ever accepted
 pub const EPOCH_FILE: &str = "release-epoch";
 
-/// Höchstens so viele Patch-Versionen Sprung (innerhalb derselben Minor-Version bzw. ab x.(y+1).0)
+/// At most this many patch versions of jump (within the same minor version, or from x.(y+1).0)
 pub const MAX_PATCH_JUMP: u64 = 50;
 
-/// Version dieses Binaries (zum Testen von Updates per TYROSD_VERSION beim Bauen überschreibbar)
+/// Version of this binary (can be overridden at build time via TYROSD_VERSION for testing updates)
 pub const AGENT_VERSION: &str = match option_env!("TYROSD_VERSION") {
     Some(v) => v,
     None => env!("CARGO_PKG_VERSION"),
@@ -56,31 +56,31 @@ pub struct FileInfo {
     pub size: u64,
 }
 
-/// Release-Manifest. Unbekannte Felder werden ignoriert (kein `deny_unknown_fields`) – neue Felder wie `key_epoch`
-/// bleiben so für ältere Agenten lesbar.
+/// Release manifest. Unknown fields are ignored (no `deny_unknown_fields`) – so new fields like `key_epoch`
+/// stay readable for older agents.
 #[derive(Deserialize, Debug, Clone)]
 pub struct Manifest {
     pub product: String,
     pub version: String,
     pub files: std::collections::HashMap<String, FileInfo>,
-    /// Unix-Sekunden; danach ist das Manifest ungültig (Schutz vor „Einfrieren“
-    /// durch eine Quelle, die dauerhaft ein altes, gültig signiertes Manifest liefert)
+    /// Unix seconds; after that the manifest is invalid (protection against "freezing"
+    /// by a source that permanently serves an old, validly signed manifest)
     #[serde(default)]
     pub expires: u64,
-    /// Epoche des Signierschlüssels (optional, ab 0.4.10 vom Signierwerkzeug geschrieben). Ist sie gesetzt, muss sie
-    /// zum tatsächlich prüfenden Schlüssel passen.
+    /// Epoch of the signing key (optional, written by the signing tool since 0.4.10). If set, it must
+    /// match the key that actually verifies.
     #[serde(default)]
     pub key_epoch: Option<u32>,
 }
 
-/// Standard-Liste erlaubter Update-Quellen (Präfixe). Eine von der Zentrale
-/// gemeldete Quelle außerhalb dieser Liste wird ignoriert.
+/// Default list of allowed update sources (prefixes). A source reported by the
+/// central server outside this list is ignored.
 pub const DEFAULT_UPDATE_SOURCES: &[&str] = &["https://get.tyrosec.com/"];
 
-/// Ist `base` eine erlaubte Update-Quelle?
+/// Is `base` an allowed update source?
 pub fn source_allowed(base: &str, allowed: &[String]) -> bool {
     let b = base.trim();
-    // keine Tricks wie https://get.tyrosec.com.evil.tld oder Benutzer@Host
+    // no tricks like https://get.tyrosec.com.evil.tld or user@host
     if b.contains('@') || b.contains("..") {
         return false;
     }
@@ -98,7 +98,7 @@ struct Marker {
     attempts: u32,
 }
 
-/// a > b für Versionen der Form 1.2.3 (fehlende Teile = 0, nicht-numerische Teile = 0)
+/// a > b for versions of the form 1.2.3 (missing parts = 0, non-numeric parts = 0)
 pub fn version_gt(a: &str, b: &str) -> bool {
     let p = |s: &str| -> Vec<u64> { s.split(['.', '-', '+']).take(3).map(|x| x.parse().unwrap_or(0)).collect() };
     let (mut x, mut y) = (p(a), p(b));
@@ -107,7 +107,7 @@ pub fn version_gt(a: &str, b: &str) -> bool {
     x > y
 }
 
-/// Streng „x.y.z“ (nur Ziffern, je Teil höchstens 9 Stellen)
+/// Strictly "x.y.z" (digits only, at most 9 digits per part)
 fn parse_version(s: &str) -> Option<[u64; 3]> {
     let v: Vec<&str> = s.split('.').collect();
     if v.len() != 3 || v.iter().any(|x| x.is_empty() || x.len() > 9 || !x.bytes().all(|b| b.is_ascii_digit())) {
@@ -116,9 +116,9 @@ fn parse_version(s: &str) -> Option<[u64; 3]> {
     Some([v[0].parse().ok()?, v[1].parse().ok()?, v[2].parse().ok()?])
 }
 
-/// Darf von `current` auf `target` gesprungen werden? Gleiche Major-Version, Minor höchstens +1, Patch höchstens
-/// `MAX_PATCH_JUMP` weiter (bzw. ≤ `MAX_PATCH_JUMP` in der nächsten Minor-Version). Ein Wechsel der Major-Version
-/// braucht vorher ein Agent-Release, das diese Regel anpasst.
+/// May we jump from `current` to `target`? Same major version, minor at most +1, patch at most
+/// `MAX_PATCH_JUMP` ahead (or ≤ `MAX_PATCH_JUMP` in the next minor version). A change of the major version
+/// first requires an agent release that adjusts this rule.
 pub fn version_jump_ok(target: &str, current: &str) -> bool {
     let (Some(t), Some(c)) = (parse_version(target), parse_version(current)) else { return false };
     if t[0] != c[0] {
@@ -131,8 +131,8 @@ pub fn version_jump_ok(target: &str, current: &str) -> bool {
     }
 }
 
-/// Höchste je angenommene Schlüssel-Epoche (fehlt die Datei: `MIN_KEY_EPOCH`)
-#[allow(clippy::unnecessary_min_or_max)] // MIN_KEY_EPOCH ist derzeit 0, wird nach der Rotation angehoben
+/// Highest key epoch ever accepted (if the file is missing: `MIN_KEY_EPOCH`)
+#[allow(clippy::unnecessary_min_or_max)] // MIN_KEY_EPOCH is currently 0, will be raised after the rotation
 pub fn known_epoch(data_dir: &str) -> u32 {
     std::fs::read_to_string(format!("{data_dir}/{EPOCH_FILE}"))
         .ok()
@@ -141,7 +141,7 @@ pub fn known_epoch(data_dir: &str) -> u32 {
         .max(MIN_KEY_EPOCH)
 }
 
-/// Schlüssel-Epoche vermerken – nur nach oben, atomar (temporäre Datei + rename)
+/// Record the key epoch – only upwards, atomically (temporary file + rename)
 pub fn store_epoch(data_dir: &str, epoch: u32) -> Result<()> {
     if epoch <= known_epoch(data_dir) && std::path::Path::new(&format!("{data_dir}/{EPOCH_FILE}")).exists() {
         return Ok(());
@@ -159,7 +159,7 @@ pub fn store_epoch(data_dir: &str, epoch: u32) -> Result<()> {
     Ok(())
 }
 
-/// Laden mit Größenlimit (auch für das YARA-Regelpaket, `rules.rs`)
+/// Download with a size limit (also for the YARA rule package, `rules.rs`)
 pub fn fetch_limited(url: &str, limit: u64) -> Result<Vec<u8>> {
     fetch(url, limit)
 }
@@ -168,7 +168,7 @@ fn fetch(url: &str, limit: u64) -> Result<Vec<u8>> {
     if let Some(path) = url.strip_prefix("file://") {
         return Ok(std::fs::read(path).with_context(|| path.to_string())?);
     }
-    // Integrität kommt aus der Signatur; Transport über HTTPS mit Web-PKI (oder lokal)
+    // integrity comes from the signature; transport via HTTPS with Web PKI (or local)
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(120)).try_proxy_from_env(true).build();
     let resp = agent.get(url).call().map_err(|e| anyhow!("{url}: {e}"))?;
     let mut v = Vec::new();
@@ -183,70 +183,70 @@ pub fn arch_file() -> &'static str {
     }
 }
 
-/// eingebaute Schlüssel mit ihren Epochen
+/// built-in keys with their epochs
 pub fn release_keys() -> Vec<(&'static [u8; 32], u32)> {
     RELEASE_PUBKEYS.iter().copied().zip(RELEASE_KEY_EPOCHS).collect()
 }
 
-/// Manifest laden und prüfen. `Ok(None)`, wenn keine höhere Version vorliegt. Die Schlüssel-Epoche eines gültigen
-/// Manifests wird in `data_dir` vermerkt (nur nach oben).
+/// Download and verify the manifest. `Ok(None)` if no higher version is available. The key epoch of a valid
+/// manifest is recorded in `data_dir` (only upwards).
 pub fn check(base: &str, data_dir: &str) -> Result<Option<Manifest>> {
     let base = base.trim_end_matches('/');
     let raw = fetch(&format!("{base}/manifest.json"), 1 << 20)?;
     let sig = fetch(&format!("{base}/manifest.json.sig"), 1024)?;
     let (m, epoch) = verify_manifest_any(&raw, &sig, &release_keys(), known_epoch(data_dir), AGENT_VERSION)?;
     if let Err(e) = store_epoch(data_dir, epoch) {
-        eprintln!("Schlüssel-Epoche {epoch} nicht gespeichert: {e:#}");
+        eprintln!("key epoch {epoch} not saved: {e:#}");
     }
     Ok(m)
 }
 
-/// Wie `verify_manifest`, gültig mit einem der vertrauenswürdigen Schlüssel `(Schlüssel, Epoche)`; Schlüssel mit einer
-/// Epoche unter `min_epoch` gelten als widerrufen. Liefert zusätzlich die Epoche des prüfenden Schlüssels.
+/// Like `verify_manifest`, valid with one of the trusted keys `(key, epoch)`; keys with an
+/// epoch below `min_epoch` count as revoked. Additionally returns the epoch of the verifying key.
 pub fn verify_manifest_any(raw: &[u8], sig: &[u8], keys: &[(&[u8; 32], u32)], min_epoch: u32, current: &str) -> Result<(Option<Manifest>, u32)> {
     let valid = |k: &[u8; 32]| ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, &k[..]).verify(raw, sig).is_ok();
-    // höchste passende Epoche (falls ein Schlüssel mehrfach eingetragen wäre)
+    // highest matching epoch (in case a key were listed more than once)
     let Some((key, epoch)) = keys.iter().filter(|(k, _)| valid(k)).max_by_key(|(_, e)| *e).copied() else {
-        bail!("Signatur des Release-Manifests ungültig – Update abgelehnt");
+        bail!("release manifest signature invalid – update rejected");
     };
     if epoch < min_epoch {
-        bail!("Release-Manifest mit widerrufenem Schlüssel (Epoche {epoch} < {min_epoch}) signiert – Update abgelehnt");
+        bail!("release manifest signed with a revoked key (epoch {epoch} < {min_epoch}) – update rejected");
     }
     let m = verify_manifest(raw, sig, key, current)?;
     let declared: Manifest = serde_json::from_slice(raw).context("Manifest")?;
     if let Some(d) = declared.key_epoch {
         if d != epoch {
-            bail!("Schlüssel-Epoche im Manifest ({d}) passt nicht zum Signierschlüssel ({epoch}) – Update abgelehnt");
+            bail!("key epoch in the manifest ({d}) does not match the signing key ({epoch}) – update rejected");
         }
     }
     Ok((m, epoch))
 }
 
-/// Signatur, Produkt, Ablaufdatum und Version prüfen (schlüssel-parametrisch für Tests).
+/// Verify signature, product, expiry date and version (key-parameterized for tests).
 pub fn verify_manifest(raw: &[u8], sig: &[u8], pubkey: &[u8], current: &str) -> Result<Option<Manifest>> {
     ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, pubkey)
         .verify(raw, sig)
-        .map_err(|_| anyhow!("Signatur des Release-Manifests ungültig – Update abgelehnt"))?;
+        .map_err(|_| anyhow!("release manifest signature invalid – update rejected"))?;
     let m: Manifest = serde_json::from_slice(raw).context("Manifest")?;
     if m.product != "tyrosecd-agent" {
-        bail!("Manifest für falsches Produkt: {}", m.product);
+        bail!("manifest for the wrong product: {}", m.product);
     }
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     if m.expires == 0 || m.expires < now {
-        bail!("Release-Manifest {} ist abgelaufen oder ohne Ablaufdatum – Update abgelehnt", m.version);
+        bail!("release manifest {} has expired or has no expiry date – update rejected", m.version);
     }
     if !version_gt(&m.version, current) {
         return Ok(None);
     }
     if !version_jump_ok(&m.version, current) {
-        bail!("Release-Manifest {} ist ein unzulässiger Versionssprung von {current} – Update abgelehnt", m.version);
+        bail!("release manifest {} is an invalid version jump from {current} – update rejected", m.version);
     }
     Ok(Some(m))
 }
 
-/// Meldet das Programm unter `path` mit `--version` genau `tyrosecd <version>`? Ausgeführt ohne Umgebung, ohne
-/// Eingabe und mit Zeitlimit (das Programm ist zu diesem Zeitpunkt bereits über die Prüfsumme im signierten Manifest
-/// bestätigt – es ist genau das Programm, das gleich ohnehin als root läuft).
+/// Does the program at `path` report exactly `tyrosecd <version>` with `--version`? Run without environment, without
+/// input and with a time limit (at this point the program is already confirmed by the checksum in the signed manifest
+/// – it is exactly the program that is about to run as root anyway).
 pub fn binary_version_matches(path: &std::path::Path, version: &str) -> Result<()> {
     use std::process::{Command, Stdio};
     let mut child = Command::new(path)
@@ -267,7 +267,7 @@ pub fn binary_version_matches(path: &std::path::Path, version: &str) -> Result<(
         if t0.elapsed() > Duration::from_secs(15) {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("neues Programm antwortet nicht auf --version – Update abgelehnt");
+            bail!("new program does not respond to --version – update rejected");
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -275,23 +275,23 @@ pub fn binary_version_matches(path: &std::path::Path, version: &str) -> Result<(
     child.stdout.take().map(|mut s| (&mut s).take(4096).read_to_string(&mut out));
     let got = out.trim();
     if got != format!("tyrosecd {version}") {
-        bail!("neues Programm meldet „{}“ statt Version {version} – Update abgelehnt", got.chars().take(80).collect::<String>());
+        bail!("new program reports “{}” instead of version {version} – update rejected", got.chars().take(80).collect::<String>());
     }
     Ok(())
 }
 
-/// Neues Binary laden, prüfen und atomar an die Stelle des laufenden setzen.
-/// Danach muss der Prozess neu starten (systemd: Exit-Code ≠ 0).
+/// Download the new binary, verify it and atomically put it in place of the running one.
+/// Afterwards the process must restart (systemd: exit code ≠ 0).
 pub fn apply(base: &str, m: &Manifest, data_dir: &str) -> Result<()> {
     let base = base.trim_end_matches('/');
     let name = arch_file();
-    let info = m.files.get(name).ok_or_else(|| anyhow!("Release enthält kein {name}"))?;
+    let info = m.files.get(name).ok_or_else(|| anyhow!("release does not contain {name}"))?;
     let bin = fetch(&format!("{base}/{name}"), info.size + 1)?;
     if bin.len() as u64 != info.size || hex::encode(sha2::Sha256::digest(&bin)) != info.sha256 {
-        bail!("Prüfsumme von {name} stimmt nicht – Update abgelehnt");
+        bail!("checksum of {name} does not match – update rejected");
     }
     let exe = std::env::current_exe()?.canonicalize()?;
-    let dir = exe.parent().ok_or_else(|| anyhow!("Programmverzeichnis"))?;
+    let dir = exe.parent().ok_or_else(|| anyhow!("program directory"))?;
     let new = dir.join("tyrosecd.new");
     let prev = dir.join("tyrosecd.prev");
     std::fs::write(&new, &bin)?;
@@ -299,7 +299,7 @@ pub fn apply(base: &str, m: &Manifest, data_dir: &str) -> Result<()> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755))?;
     }
-    // Programm muss selbst die Version des Manifests melden (kein altes Programm unter neuer Versionsnummer)
+    // the program must itself report the manifest's version (no old program under a new version number)
     if let Err(e) = binary_version_matches(&new, &m.version) {
         let _ = std::fs::remove_file(&new);
         return Err(e);
@@ -312,13 +312,13 @@ pub fn apply(base: &str, m: &Manifest, data_dir: &str) -> Result<()> {
         attempts: 0,
     };
     std::fs::write(format!("{data_dir}/update.json"), serde_json::to_vec(&marker)?)?;
-    std::fs::rename(&new, &exe)?; // atomar im selben Verzeichnis
+    std::fs::rename(&new, &exe)?; // atomic within the same directory
     Ok(())
 }
 
-/// Rückfall für Systeme ohne systemd-Guard: Startet das neue Binary wiederholt nicht
-/// stabil, wird die vorherige Version zurückgesetzt. Unter systemd übernimmt das
-/// `ExecStartPre` der Unit (greift auch, wenn das neue Binary sofort abstürzt).
+/// Fallback for systems without the systemd guard: if the new binary repeatedly fails to start
+/// stably, the previous version is restored. Under systemd this is handled by the unit's
+/// `ExecStartPre` (also kicks in if the new binary crashes immediately).
 pub fn startup_check(data_dir: &str) -> Option<String> {
     let path = format!("{data_dir}/update.json");
     let mut mk: Marker = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
@@ -328,7 +328,7 @@ pub fn startup_check(data_dir: &str) -> Option<String> {
         let prev = exe.parent()?.join("tyrosecd.prev");
         let _ = std::fs::remove_file(&path);
         if prev.exists() && std::fs::rename(&prev, &exe).is_ok() {
-            return Some(format!("Update {} → {} startet nicht stabil – zurück auf {}", mk.from, mk.to, mk.from));
+            return Some(format!("update {} → {} does not start stably – reverting to {}", mk.from, mk.to, mk.from));
         }
         return None;
     }
@@ -336,19 +336,19 @@ pub fn startup_check(data_dir: &str) -> Option<String> {
     None
 }
 
-/// Version, deren Update zurückgerollt wurde (vom systemd-Wächter als update.failed
-/// abgelegt). Diese Version wird nicht erneut installiert, sonst entstünde eine Schleife.
+/// Version whose update was rolled back (stored by the systemd guard as update.failed).
+/// This version is not installed again, otherwise a loop would result.
 pub fn failed_version(data_dir: &str) -> Option<String> {
     let mk: Marker = serde_json::from_slice(&std::fs::read(format!("{data_dir}/update.failed")).ok()?).ok()?;
     Some(mk.to)
 }
 
-/// Nach stabiler Laufzeit aufrufen: Update bestätigt. Liefert (von, nach).
+/// Call after a stable run time: update confirmed. Returns (from, to).
 pub fn confirm(data_dir: &str) -> Option<(String, String)> {
     let path = format!("{data_dir}/update.json");
     let mk: Marker = serde_json::from_slice(&std::fs::read(&path).ok()?).ok()?;
     let _ = std::fs::remove_file(&path);
-    let _ = std::fs::remove_file(format!("{data_dir}/update.attempts")); // Zähler des systemd-Guards
+    let _ = std::fs::remove_file(format!("{data_dir}/update.attempts")); // counter of the systemd guard
     Some((mk.from, mk.to))
 }
 
@@ -387,7 +387,7 @@ mod tests {
         std::fs::write(d.path().join("manifest.json.sig"), [0u8; 64]).unwrap();
         let base = format!("file://{}", d.path().display());
         let err = check(&base, &d.path().to_string_lossy()).unwrap_err().to_string();
-        assert!(err.contains("Signatur"), "{err}");
+        assert!(err.contains("signature"), "{err}");
     }
 
     #[test]
@@ -401,7 +401,7 @@ mod tests {
         assert_eq!(known_epoch(&dd), 1);
         store_epoch(&dd, 2).unwrap();
         assert_eq!(known_epoch(&dd), 2);
-        // kaputte Datei → Untergrenze
+        // broken file → lower bound
         std::fs::write(d.path().join(EPOCH_FILE), "x").unwrap();
         assert_eq!(known_epoch(&dd), MIN_KEY_EPOCH);
     }
@@ -426,7 +426,7 @@ mod tests {
         };
         let ok = script("ok", r#"[ "$1" = "--version" ] && echo "tyrosecd 0.4.10""#);
         assert!(binary_version_matches(&ok, "0.4.10").is_ok());
-        // altes Programm unter neuer Versionsnummer
+        // old program under a new version number
         assert!(binary_version_matches(&ok, "0.4.11").is_err());
         let old = script("old", r#"echo "tyrosecd 0.4.9""#);
         assert!(binary_version_matches(&old, "0.4.10").unwrap_err().to_string().contains("0.4.9"));
@@ -466,7 +466,7 @@ mod hardening_tests {
 
     #[test]
     fn any_trusted_key_is_accepted_others_not() {
-        // Rotation: Manifest mit dem neuen Schlüssel signiert, Agent kennt alt + neu + Reserve
+        // rotation: manifest signed with the new key, agent knows old + new + reserve
         let (old, new, foreign) = (keypair(), keypair(), keypair());
         let (ko, kn) = (pk(&old), pk(&new));
         let raw = manifest("0.0.2", now() + 3600);
@@ -476,7 +476,7 @@ mod hardening_tests {
         assert_eq!(e, 1);
         assert!(verify_manifest_any(&raw, sig.as_ref(), &[(&ko, 0)], 0, "0.0.1").is_err());
         assert!(verify_manifest_any(&raw, foreign.sign(&raw).as_ref(), &[(&ko, 0), (&kn, 1)], 0, "0.0.1").is_err());
-        // eingebaute Schlüssel: drei verschiedene
+        // built-in keys: three different ones
         assert_ne!(RELEASE_PUBKEYS[0], RELEASE_PUBKEYS[1]);
         assert_ne!(RELEASE_PUBKEYS[1], RELEASE_PUBKEYS[2]);
     }
@@ -487,13 +487,13 @@ mod hardening_tests {
         let (ko, kn) = (pk(&old), pk(&new));
         let keys = [(&ko, 0), (&kn, 1)];
         let raw = manifest("0.0.2", now() + 3600);
-        // noch kein neuerer Schlüssel gesehen: alter gilt
+        // no newer key seen yet: the old one is valid
         assert!(verify_manifest_any(&raw, old.sign(&raw).as_ref(), &keys, 0, "0.0.1").unwrap().0.is_some());
-        // nachdem Epoche 1 angenommen wurde: alter Schlüssel widerrufen, neuer weiter gültig
+        // after epoch 1 was accepted: old key revoked, new one still valid
         let e = verify_manifest_any(&raw, old.sign(&raw).as_ref(), &keys, 1, "0.0.1").unwrap_err();
-        assert!(e.to_string().contains("widerrufen"), "{e}");
+        assert!(e.to_string().contains("revoked"), "{e}");
         assert!(verify_manifest_any(&raw, new.sign(&raw).as_ref(), &keys, 1, "0.0.1").is_ok());
-        // auch „keine neuere Version“ mit altem Schlüssel wird abgelehnt (kein stilles Durchwinken)
+        // even "no newer version" with the old key is rejected (no silent pass-through)
         let same = manifest("0.0.1", now() + 3600);
         assert!(verify_manifest_any(&same, old.sign(&same).as_ref(), &keys, 1, "0.0.1").is_err());
     }
@@ -505,17 +505,17 @@ mod hardening_tests {
         let keys = [(&ko, 0), (&kn, 1)];
         let good = manifest_epoch("0.0.2", now() + 3600, 1);
         assert_eq!(verify_manifest_any(&good, new.sign(&good).as_ref(), &keys, 0, "0.0.1").unwrap().1, 1);
-        // mit dem alten Schlüssel signiert, gibt sich aber als Epoche 1 aus
+        // signed with the old key, but claims to be epoch 1
         let e = verify_manifest_any(&good, old.sign(&good).as_ref(), &keys, 0, "0.0.1").unwrap_err();
-        assert!(e.to_string().contains("passt nicht"), "{e}");
-        // ohne Feld (Manifeste bis 0.4.9) weiterhin gültig
+        assert!(e.to_string().contains("does not match"), "{e}");
+        // without the field (manifests up to 0.4.9) still valid
         let plain = manifest("0.0.2", now() + 3600);
         assert!(verify_manifest_any(&plain, old.sign(&plain).as_ref(), &keys, 0, "0.0.1").is_ok());
     }
 
     #[test]
     fn check_persists_epoch_and_then_rejects_old_key() {
-        // Ende-zu-Ende über Dateien, mit Testschlüsseln statt der eingebauten
+        // end to end via files, with test keys instead of the built-in ones
         let (old, new) = (keypair(), keypair());
         let (ko, kn) = (pk(&old), pk(&new));
         let keys = [(&ko, 0u32), (&kn, 1u32)];
@@ -530,7 +530,7 @@ mod hardening_tests {
 
     #[test]
     fn manifest_with_new_fields_parses_like_before() {
-        // Agent ≤ 0.4.9 liest dieselbe Struktur ohne `key_epoch` – unbekannte Felder dürfen nicht stören
+        // agent ≤ 0.4.9 reads the same structure without `key_epoch` – unknown fields must not interfere
         #[derive(Deserialize)]
         #[allow(dead_code)]
         struct OldManifest {
@@ -561,7 +561,7 @@ mod hardening_tests {
         for v in ["999.0.0", "0.9.0", "0.0.999"] {
             let raw = manifest(v, now() + 3600);
             let e = verify_manifest(&raw, kp.sign(&raw).as_ref(), kp.public_key().as_ref(), "0.0.1").unwrap_err();
-            assert!(e.to_string().contains("Versionssprung"), "{v}: {e}");
+            assert!(e.to_string().contains("version jump"), "{v}: {e}");
         }
     }
 
@@ -570,7 +570,7 @@ mod hardening_tests {
         let kp = keypair();
         for raw in [manifest("0.0.2", now() - 1), manifest("0.0.2", 0)] {
             let e = verify_manifest(&raw, kp.sign(&raw).as_ref(), kp.public_key().as_ref(), "0.0.1").unwrap_err();
-            assert!(e.to_string().contains("abgelaufen"), "{e}");
+            assert!(e.to_string().contains("expired"), "{e}");
         }
     }
 
@@ -582,7 +582,7 @@ mod hardening_tests {
         let other = keypair();
         let raw = manifest("0.0.9", now() + 3600);
         assert!(verify_manifest(&raw, other.sign(&raw).as_ref(), kp.public_key().as_ref(), "0.0.1").is_err());
-        // Manifest nach dem Signieren verändert
+        // manifest modified after signing
         let mut tampered = raw.clone();
         let sig = kp.sign(&raw);
         tampered[40] ^= 1;

@@ -1,5 +1,5 @@
-# Reproduzierbarer Build: Pfade der Build-Umgebung nicht in die Programmdatei übernehmen (siehe VERIFY.md).
-# Gilt für den offiziellen Build und für verify.sh gleichermaßen (Quellcode unter /src/agent, Ziel unter /target).
+# Reproducible build: do not embed paths of the build environment in the binary (see VERIFY.md).
+# Applies equally to the official build and to verify.sh (source under /src/agent, target under /target).
 [build]
 rustflags = [
     "--remap-path-prefix=/src/agent=tyrosecd",

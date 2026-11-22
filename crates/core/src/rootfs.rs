@@ -1,18 +1,18 @@
-//! Dateien unter einer fremden Wurzel lesen (Container: `/proc/<pid>/root`, nspawn-/LXC-Wurzeln).
+//! Reading files under a foreign root (containers: `/proc/<pid>/root`, nspawn/LXC roots).
 //!
-//! Der Inhalt einer Container-Wurzel gehört dem Container (bei User-Namespaces auch einem unprivilegierten Benutzer).
-//! Pfadbasiertes Lesen (`/proc/<pid>/root/etc/hostname`) folgt absoluten Symlinks im Container auf den **Host**
-//! (`/etc/hostname → /etc/shadow`) und öffnet Geräte/FIFOs (`→ /dev/zero` → Speicher voll, Agent aus). Deshalb:
-//! - `openat2` relativ zu einem Deskriptor der Wurzel mit `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS`: Symlinks und
-//!   `..` werden innerhalb der Wurzel aufgelöst, `/proc/self/…`-Sprünge sind verboten
-//! - erst `O_PATH` öffnen, per `fstat` prüfen (nur reguläre Dateien bzw. Verzeichnisse), dann über den Deskriptor lesen
-//!   – kein Öffnen von Geräten/FIFOs, kein Wettlauf zwischen Prüfung und Lesen
-//! - feste Größengrenzen je Datei
-//! - ohne `openat2` (Kernel < 5.6, `ENOSYS`) wird **nicht** auf unsicheres Öffnen zurückgefallen: die Wurzel wird dann
-//!   gar nicht gelesen (`FsRoot::contained` schlägt fehl)
+//! The content of a container root belongs to the container (with user namespaces also to an unprivileged user).
+//! Path-based reading (`/proc/<pid>/root/etc/hostname`) follows absolute symlinks in the container onto the **host**
+//! (`/etc/hostname → /etc/shadow`) and opens devices/FIFOs (`→ /dev/zero` → memory full, agent dead). Therefore:
+//! - `openat2` relative to a descriptor of the root with `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS`: symlinks and
+//!   `..` are resolved within the root, `/proc/self/…` jumps are forbidden
+//! - open with `O_PATH` first, check via `fstat` (only regular files or directories), then read via the descriptor
+//!   – no opening of devices/FIFOs, no race between check and read
+//! - fixed size limits per file
+//! - without `openat2` (kernel < 5.6, `ENOSYS`) there is **no** fallback to unsafe opening: the root is then
+//!   not read at all (`FsRoot::contained` fails)
 //!
-//! `FsRoot::Host` liest wie bisher pfadbasiert unter einem Präfix (eigenes System, Test-Wurzeln), mit denselben
-//! Prüfungen auf Dateityp und Größe.
+//! `FsRoot::Host` reads path-based under a prefix as before (own system, test roots), with the same
+//! checks on file type and size.
 
 use std::ffi::CString;
 use std::io::{self, Read};
@@ -20,12 +20,12 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 
-/// Kleine Konfigurationsdateien (os-release, hostname, Header von Plugins …)
+/// Small configuration files (os-release, hostname, plugin headers …)
 pub const SMALL: u64 = 1 << 20;
-/// Paketdatenbanken (dpkg status, apk installed, .list-Dateien, rpmdb)
+/// Package databases (dpkg status, apk installed, .list files, rpmdb)
 pub const PKG_DB: u64 = 256 << 20;
 
-// Linux-UAPI (linux/openat2.h); Systemaufruf-Nummer 437 ist auf allen Architekturen gleich (seit 5.6).
+// Linux UAPI (linux/openat2.h); syscall number 437 is the same on all architectures (since 5.6).
 const SYS_OPENAT2: libc::c_long = 437;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
 const RESOLVE_IN_ROOT: u64 = 0x10;
@@ -37,15 +37,15 @@ struct OpenHow {
     resolve: u64,
 }
 
-/// Wurzel, unter der gelesen wird
+/// Root under which reading happens
 pub enum FsRoot {
-    /// eigenes System bzw. Test-Wurzel: Pfad = Präfix + relativer Pfad
+    /// own system or test root: path = prefix + relative path
     Host(String),
-    /// fremde Wurzel (Container): nur über `openat2` relativ zu diesem Deskriptor
+    /// foreign root (container): only via `openat2` relative to this descriptor
     Contained { fd: OwnedFd, path: String },
 }
 
-/// Art eines Eintrags (ohne Symlinks zu folgen)
+/// Kind of an entry (without following symlinks)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     File,
@@ -60,20 +60,20 @@ fn rel_cstr(rel: &str) -> io::Result<CString> {
 
 fn openat2(dir: &OwnedFd, rel: &str, flags: i32) -> io::Result<OwnedFd> {
     let p = rel_cstr(rel)?;
-    // openat2 ist streng: zu O_PATH sind nur O_DIRECTORY/O_NOFOLLOW/O_CLOEXEC erlaubt (sonst EINVAL)
+    // openat2 is strict: with O_PATH only O_DIRECTORY/O_NOFOLLOW/O_CLOEXEC are allowed (otherwise EINVAL)
     let extra = if flags & libc::O_PATH != 0 { libc::O_CLOEXEC } else { libc::O_CLOEXEC | libc::O_NOCTTY };
     let how = OpenHow { flags: (flags | extra) as u64, mode: 0, resolve: RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS };
-    // SAFETY: gültige Zeiger auf p/how für die Dauer des Aufrufs; Ergebnis ist ein neuer Deskriptor oder -1
+    // SAFETY: valid pointers to p/how for the duration of the call; result is a new descriptor or -1
     let r = unsafe { libc::syscall(SYS_OPENAT2, dir.as_raw_fd(), p.as_ptr(), &how as *const OpenHow, std::mem::size_of::<OpenHow>()) };
     if r < 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: r ist ein eben geöffneter, uns gehörender Deskriptor
+    // SAFETY: r is a just-opened descriptor that we own
     Ok(unsafe { OwnedFd::from_raw_fd(r as i32) })
 }
 
 fn fstat(fd: &OwnedFd) -> io::Result<libc::stat> {
-    // SAFETY: st wird vom Kern gefüllt
+    // SAFETY: st is filled by the kernel
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } != 0 {
         return Err(io::Error::last_os_error());
@@ -89,15 +89,15 @@ fn kind_of(mode: u32) -> Kind {
     }
 }
 
-/// Deskriptor (O_PATH) über /proc/self/fd neu zum Lesen öffnen – gleicher Inode, keine erneute Pfadauflösung
+/// Reopen a descriptor (O_PATH) for reading via /proc/self/fd – same inode, no new path resolution
 fn reopen(fd: &OwnedFd, flags: i32) -> io::Result<std::fs::File> {
     let p = CString::new(format!("/proc/self/fd/{}", fd.as_raw_fd())).unwrap();
-    // SAFETY: gültiger C-String
+    // SAFETY: valid C string
     let r = unsafe { libc::open(p.as_ptr(), flags | libc::O_CLOEXEC | libc::O_NOCTTY) };
     if r < 0 {
         return Err(io::Error::last_os_error());
     }
-    // SAFETY: r ist ein eben geöffneter, uns gehörender Deskriptor
+    // SAFETY: r is a just-opened descriptor that we own
     Ok(std::fs::File::from(unsafe { OwnedFd::from_raw_fd(r) }))
 }
 
@@ -115,28 +115,28 @@ impl FsRoot {
         FsRoot::Host(prefix.trim_end_matches('/').to_string())
     }
 
-    /// Fremde Wurzel öffnen. Fehler (auch: Kernel ohne `openat2`) → die Wurzel wird nicht gelesen.
+    /// Open a foreign root. Errors (also: kernel without `openat2`) → the root is not read.
     pub fn contained(path: &str) -> io::Result<FsRoot> {
         let c = CString::new(std::path::Path::new(path).as_os_str().as_bytes()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
-        // die Wurzel selbst (z. B. der Magic-Link /proc/<pid>/root) wird bewusst normal aufgelöst
-        // SAFETY: gültiger C-String
+        // the root itself (e.g. the magic link /proc/<pid>/root) is deliberately resolved normally
+        // SAFETY: valid C string
         let r = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC) };
         if r < 0 {
             return Err(io::Error::last_os_error());
         }
-        // SAFETY: eben geöffneter Deskriptor
+        // SAFETY: just-opened descriptor
         let fd = unsafe { OwnedFd::from_raw_fd(r) };
-        // openat2 vorhanden? (ENOSYS auf Kerneln < 5.6, EPERM/ENOSYS unter manchen seccomp-Filtern)
+        // openat2 available? (ENOSYS on kernels < 5.6, EPERM/ENOSYS under some seccomp filters)
         openat2(&fd, ".", libc::O_PATH | libc::O_DIRECTORY)?;
         Ok(FsRoot::Contained { fd, path: path.trim_end_matches('/').to_string() })
     }
 
-    /// Wird `openat2` vom Kernel unterstützt?
+    /// Is `openat2` supported by the kernel?
     pub fn openat2_supported() -> bool {
         FsRoot::contained("/").is_ok()
     }
 
-    /// Anzeigepfad (Präfix bzw. Wurzelpfad + relativer Pfad) – nur zum Melden, nie zum Öffnen fremder Wurzeln
+    /// Display path (prefix or root path + relative path) – only for reporting, never for opening foreign roots
     pub fn display(&self, rel: &str) -> String {
         let pre = match self {
             FsRoot::Host(p) => p.as_str(),
@@ -149,12 +149,12 @@ impl FsRoot {
         matches!(self, FsRoot::Contained { .. })
     }
 
-    /// Ist dies das echte Wurzelverzeichnis des Hosts (Präfix leer)?
+    /// Is this the real root directory of the host (empty prefix)?
     pub fn is_host_root(&self) -> bool {
         matches!(self, FsRoot::Host(p) if p.is_empty())
     }
 
-    /// Art des Ziels (Symlinks werden – innerhalb der Wurzel – aufgelöst); `None`, wenn nicht vorhanden
+    /// Kind of the target (symlinks are resolved – within the root); `None` if it does not exist
     pub fn kind(&self, rel: &str) -> Option<Kind> {
         match self {
             FsRoot::Host(_) => std::fs::metadata(self.display(rel)).ok().map(|m| kind_of(m.mode())),
@@ -173,11 +173,11 @@ impl FsRoot {
         self.kind(rel).is_some()
     }
 
-    /// Reguläre Datei lesen, höchstens `limit` Bytes (größere Dateien: `None`, nicht gekürzt)
+    /// Read a regular file, at most `limit` bytes (larger files: `None`, not truncated)
     pub fn read(&self, rel: &str, limit: u64) -> Option<Vec<u8>> {
         match self {
             FsRoot::Host(_) => {
-                // O_NONBLOCK: eine FIFO blockiert das Öffnen nicht; danach Typprüfung am offenen Deskriptor
+                // O_NONBLOCK: a FIFO does not block the open; then type check on the open descriptor
                 use std::os::unix::fs::OpenOptionsExt;
                 let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY).open(self.display(rel)).ok()?;
                 let m = f.metadata().ok()?;
@@ -198,7 +198,7 @@ impl FsRoot {
         }
     }
 
-    /// Anfang einer regulären Datei (höchstens `n` Bytes, auch bei größeren Dateien)
+    /// Start of a regular file (at most `n` bytes, also for larger files)
     pub fn read_head(&self, rel: &str, n: u64) -> Option<Vec<u8>> {
         let f = match self {
             FsRoot::Host(_) => {
@@ -222,12 +222,12 @@ impl FsRoot {
         Some(v)
     }
 
-    /// wie `read`, als Text (ungültiges UTF-8 ersetzt)
+    /// like `read`, as text (invalid UTF-8 replaced)
     pub fn read_string(&self, rel: &str, limit: u64) -> Option<String> {
         self.read(rel, limit).map(|v| String::from_utf8(v).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned()))
     }
 
-    /// Einträge eines Verzeichnisses: (Name, Art ohne Symlinks zu folgen), höchstens `max`
+    /// Entries of a directory: (name, kind without following symlinks), at most `max`
     pub fn read_dir(&self, rel: &str, max: usize) -> Vec<(String, Kind)> {
         let conv = |e: std::fs::DirEntry| {
             let k = match e.file_type() {
@@ -241,7 +241,7 @@ impl FsRoot {
             FsRoot::Host(_) => std::fs::read_dir(self.display(rel)).map(|rd| rd.flatten().take(max).map(conv).collect()).unwrap_or_default(),
             FsRoot::Contained { fd, .. } => {
                 let Ok(d) = openat2(fd, rel, libc::O_RDONLY | libc::O_DIRECTORY) else { return Vec::new() };
-                // /proc/self/fd/N zeigt auf genau dieses (bereits sicher geöffnete) Verzeichnis
+                // /proc/self/fd/N points to exactly this (already safely opened) directory
                 let out = std::fs::read_dir(format!("/proc/self/fd/{}", d.as_raw_fd())).map(|rd| rd.flatten().take(max).map(conv).collect()).unwrap_or_default();
                 drop(d);
                 out
@@ -249,8 +249,8 @@ impl FsRoot {
         }
     }
 
-    /// Verzeichnisbaum ab `rel` durchlaufen (ohne Symlinks zu folgen, Tiefe ≤ `max_depth`); `f(relativer Pfad, Art)`
-    /// liefert `false`, um ein Verzeichnis nicht zu betreten. Höchstens `max` Einträge insgesamt.
+    /// Walk the directory tree from `rel` (without following symlinks, depth ≤ `max_depth`); `f(relative path, kind)`
+    /// returns `false` to not enter a directory. At most `max` entries in total.
     pub fn walk(&self, rel: &str, max_depth: usize, max: usize, f: &mut dyn FnMut(&str, Kind) -> bool) {
         let mut stack = vec![(rel.trim_end_matches('/').to_string(), 0usize)];
         let mut n = 0;
@@ -270,7 +270,7 @@ impl FsRoot {
     }
 }
 
-/// Höchstens `max` Zeichen, ohne Steuerzeichen (Namen/Hostnamen aus fremden Wurzeln für die Zentrale)
+/// At most `max` characters, without control characters (names/host names from foreign roots for the central server)
 pub fn cap_name(s: &str, max: usize) -> String {
     s.trim().chars().filter(|c| !c.is_control()).take(max).collect()
 }
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn contained_reads_stay_inside_root() {
         if !FsRoot::openat2_supported() {
-            eprintln!("openat2 nicht verfügbar – Test übersprungen");
+            eprintln!("openat2 not available – test skipped");
             return;
         }
         let d = tempfile::tempdir().unwrap();
@@ -294,10 +294,10 @@ mod tests {
         std::fs::create_dir_all(root.join("usr/lib")).unwrap();
         std::fs::write(host.join("etc/secret"), "HOST-SECRET").unwrap();
         std::fs::write(root.join("usr/lib/os-release"), "ID=debian\n").unwrap();
-        // relativer und absoluter Symlink im Container (absolut = Container-Wurzel, nicht Host)
+        // relative and absolute symlink in the container (absolute = container root, not host)
         symlink("../usr/lib/os-release", root.join("etc/os-release")).unwrap();
         symlink("/usr/lib/os-release", root.join("etc/abs")).unwrap();
-        // Ausbruchsversuche
+        // Escape attempts
         symlink(host.join("etc/secret"), root.join("etc/hostname")).unwrap();
         symlink("../../host/etc/secret", root.join("etc/dotdot")).unwrap();
         symlink("/proc/self/root/etc/passwd", root.join("etc/magic")).unwrap();
@@ -309,19 +309,19 @@ mod tests {
         let fs = FsRoot::contained(&root.to_string_lossy()).unwrap();
         assert_eq!(fs.read_string("/etc/os-release", SMALL).as_deref(), Some("ID=debian\n"));
         assert_eq!(fs.read_string("/etc/abs", SMALL).as_deref(), Some("ID=debian\n"));
-        assert_eq!(fs.read("/etc/hostname", SMALL), None, "absoluter Symlink auf den Host");
-        assert_eq!(fs.read("/etc/dotdot", SMALL), None, ".. über die Wurzel hinaus");
+        assert_eq!(fs.read("/etc/hostname", SMALL), None, "absolute symlink to the host");
+        assert_eq!(fs.read("/etc/dotdot", SMALL), None, ".. beyond the root");
         assert_eq!(fs.read("/../../host/etc/secret", SMALL), None);
         assert_eq!(fs.read("/etc/magic", SMALL), None, "Magic-Link");
-        assert_eq!(fs.read("/etc/zero", SMALL), None, "Gerät");
-        assert_eq!(fs.read("/etc/fifo", SMALL), None, "FIFO darf nicht blockieren");
-        assert_eq!(fs.read("/etc/big", SMALL), None, "zu groß");
+        assert_eq!(fs.read("/etc/zero", SMALL), None, "device");
+        assert_eq!(fs.read("/etc/fifo", SMALL), None, "FIFO must not block");
+        assert_eq!(fs.read("/etc/big", SMALL), None, "too large");
         assert!(fs.read("/etc/big", SMALL + 1).is_some());
         assert!(fs.is_dir("/etc") && !fs.is_dir("/etc/os-release") && fs.exists("/etc/os-release"));
         let mut names: Vec<_> = fs.read_dir("/etc", 100).into_iter().map(|(n, _)| n).collect();
         names.sort();
         assert!(names.contains(&"os-release".to_string()) && names.contains(&"fifo".to_string()));
-        // Wurzel als Symlink-Ziel über Verzeichnisse
+        // Root as symlink target via directories
         symlink("/", root.join("loop")).unwrap();
         assert_eq!(fs.read_string("/loop/loop/usr/lib/os-release", SMALL).as_deref(), Some("ID=debian\n"));
         let mut seen = Vec::new();

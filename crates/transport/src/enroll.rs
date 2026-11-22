@@ -1,6 +1,6 @@
-//! Enrollment: Schlüssel lokal erzeugen, CSR + Host-Infos mit Einmal-Token an
-//! die Zentrale, Client-Zertifikat speichern. Der private Schlüssel verlässt
-//! den Server nie.
+//! Enrollment: generate the key locally, send CSR + host info with a one-time token to
+//! the central server, store the client certificate. The private key never leaves
+//! the server.
 
 use anyhow::{Context, Result};
 use prost::Message;
@@ -25,22 +25,22 @@ pub fn host_info(backend: &str) -> pb::HostInfo {
     }
 }
 
-/// `server_ca_pem`: optional (Self-hosted/Test), sonst Web-PKI.
+/// `server_ca_pem`: optional (self-hosted/test), otherwise Web PKI.
 pub fn enroll(cfg: &mut AgentConfig, token: &str, server_ca_pem: Option<String>, config_path: &str) -> Result<()> {
     std::fs::create_dir_all(&cfg.data_dir)?;
     set_mode(&cfg.data_dir, 0o700);
     if let Some(ca) = server_ca_pem {
         std::fs::write(cfg.server_ca_path(), ca)?;
     }
-    // Schlüssel lokal (ECDSA P-256)
-    let key = rcgen::KeyPair::generate().context("Schlüssel erzeugen")?;
+    // key generated locally (ECDSA P-256)
+    let key = rcgen::KeyPair::generate().context("generate key")?;
     let mut params = rcgen::CertificateParams::new(Vec::<String>::new())?;
     params.distinguished_name.push(rcgen::DnType::CommonName, "tyrosecd-agent");
     let csr = params.serialize_request(&key)?.pem()?;
 
     let req = pb::EnrollRequest { token: token.into(), csr_pem: csr, host: Some(host_info("")), protocol: tyrosd_proto::PROTOCOL_VERSION };
     let client = Client::new(cfg, false)?;
-    let resp = client.post("/v1/enroll", &req.encode_to_vec(), false).context("Enrollment")?;
+    let resp = client.post("/v1/enroll", &req.encode_to_vec(), false).context("enrolment")?;
     let resp = pb::EnrollResponse::decode(resp.as_slice())?;
 
     let kp = cfg.key_path();
@@ -52,6 +52,6 @@ pub fn enroll(cfg: &mut AgentConfig, token: &str, server_ca_pem: Option<String>,
     }
     cfg.host_id = resp.host_id;
     cfg.save(config_path)?;
-    eprintln!("[tyrosecd] angemeldet: Host {} (Mandant {})", cfg.host_id, resp.tenant);
+    eprintln!("[tyrosecd] enrolled: Host {} (tenant {})", cfg.host_id, resp.tenant);
     Ok(())
 }

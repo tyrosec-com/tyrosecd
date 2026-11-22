@@ -14,7 +14,7 @@ impl std::str::FromStr for Algo {
         match s {
             "sha256" => Ok(Algo::Sha256),
             "blake3" => Ok(Algo::Blake3),
-            _ => Err(format!("unbekannter Hash-Algorithmus: {s}")),
+            _ => Err(format!("unknown hash algorithm: {s}")),
         }
     }
 }
@@ -26,13 +26,13 @@ pub fn hash_bytes(algo: Algo, data: &[u8]) -> String {
     }
 }
 
-/// Hash einer Datei, streamend. Liefert (Hash, gelesene Bytes).
+/// Hash of a file, streaming. Returns (hash, bytes read).
 pub fn hash_file(algo: Algo, path: &str) -> std::io::Result<(String, u64)> {
     hash_reader(algo, std::fs::File::open(path)?)
 }
 
-/// Wie `hash_file`, aber ohne einem Symlink zu folgen, nur normale Dateien (siehe `content::open_regular`).
-/// Liefert zusätzlich die Inode der gelesenen Datei.
+/// Like `hash_file`, but without following a symlink, regular files only (see `content::open_regular`).
+/// Additionally returns the inode of the file read.
 pub fn hash_file_nofollow(algo: Algo, path: &str) -> std::io::Result<(String, u64, u64)> {
     let (f, ino) = crate::content::open_regular(path)?;
     let (h, n) = hash_reader(algo, f)?;
@@ -70,7 +70,7 @@ fn hash_reader(algo: Algo, mut f: std::fs::File) -> std::io::Result<(String, u64
     }
 }
 
-/// MD5 einer Datei (für WordPress-Prüfsummen und dpkg-md5sums).
+/// MD5 of a file (for WordPress checksums and dpkg md5sums).
 pub fn md5_file(path: &str) -> std::io::Result<String> {
     let mut f = std::fs::File::open(path)?;
     let mut h = md5::Md5::new();

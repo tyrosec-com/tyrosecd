@@ -1,69 +1,69 @@
-//! Agent-Konfiguration `/etc/tyrosecd/agent.toml` (nur root-schreibbar).
+//! Agent configuration `/etc/tyrosecd/agent.toml` (writable by root only).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct AgentConfig {
-    /// z. B. https://ingest.tyrosec.com
+    /// e.g. https://ingest.tyrosec.com
     pub server: String,
-    /// von der Zentrale beim Enrollment vergeben
+    /// assigned by the central server during enrollment
     #[serde(default)]
     pub host_id: String,
     #[serde(default = "default_data_dir")]
     pub data_dir: String,
-    /// Wurzeln für Echtzeit-Ereignisse
+    /// roots for real-time events
     #[serde(default = "default_roots")]
     pub roots: Vec<String>,
-    /// Wurzeln für den Abgleich-Scan (leer = Standardprofile)
+    /// roots for the reconciliation scan (empty = default profiles)
     #[serde(default)]
     pub scan_roots: Vec<String>,
     #[serde(default = "default_scan_interval")]
     pub scan_interval_s: u64,
-    /// Spool-Grenze in MB (bei Überschreitung werden Inhalte/Diffs weggelassen)
+    /// spool limit in MB (when exceeded, contents/diffs are omitted)
     #[serde(default = "default_spool_mb")]
     pub spool_mb: u64,
-    /// harte Spool-Grenze in MB (Zentrale lange nicht erreichbar): darüber werden die ältesten Nachrichten
-    /// verworfen, zuerst Datei-Ereignisse/Metriken. Wirksam höchstens 10 % des freien Platzes der Datenpartition.
+    /// hard spool limit in MB (central server unreachable for a long time): above it the oldest messages are
+    /// discarded, file events/metrics first. Effective at most 10 % of the free space on the data partition.
     #[serde(default = "default_spool_max_mb")]
     pub spool_max_mb: u64,
-    /// Budget für Diff-Basis-Inhalte in MB
+    /// budget for diff base contents in MB
     #[serde(default = "default_cache_mb")]
     pub cache_mb: u64,
-    /// Ereignisse zusätzlich lokal als JSON-Zeilen schreiben (Diagnose)
+    /// additionally write events locally as JSON lines (diagnostics)
     #[serde(default)]
     pub events_jsonl: Option<String>,
-    /// Metriken alle n Sekunden erfassen (Übertragung als 1-Minuten-Aggregat)
+    /// collect metrics every n seconds (transmitted as a 1-minute aggregate)
     #[serde(default = "default_metrics_interval")]
     pub metrics_interval_s: u64,
-    /// HTTPS-Proxy (sonst Umgebungsvariable HTTPS_PROXY)
+    /// HTTPS proxy (otherwise environment variable HTTPS_PROXY)
     #[serde(default)]
     pub proxy: Option<String>,
-    /// Selbst-Update, wenn die Zentrale eine neue signierte Version meldet (Hauptplan 12.4)
+    /// self-update when the central server reports a new signed version (main plan 12.4)
     #[serde(default = "default_true")]
     pub auto_update: bool,
-    /// YARA-Regelpaket laden und Dateien damit prüfen (ab 0.5.0; Paket kommt signiert von get.tyrosec.com)
+    /// load the YARA rule package and scan files with it (since 0.5.0; the package comes signed from get.tyrosec.com)
     #[serde(default = "default_true")]
     pub yara: bool,
-    /// Beaconing-Stichprobe: alle 30 s neue ausgehende Verbindungen vermerken (ab 0.5.2, nur lesen)
+    /// beaconing sample: record new outgoing connections every 30 s (since 0.5.2, read-only)
     #[serde(default = "default_true")]
     pub beaconing: bool,
-    /// feste Update-Quelle (sonst die von der Zentrale gemeldete)
+    /// fixed update source (otherwise the one reported by the central server)
     #[serde(default)]
     pub update_base: Option<String>,
-    /// erlaubte Update-Quellen (Präfixe); von der Zentrale gemeldete Quellen außerhalb
-    /// dieser Liste werden ignoriert. Ein lokal gesetztes `update_base` gilt immer.
+    /// allowed update sources (prefixes); sources reported by the central server outside
+    /// this list are ignored. A locally set `update_base` always applies.
     #[serde(default = "default_update_sources")]
     pub update_sources: Vec<String>,
-    /// Inventar (Dienste, Ports, Firewall) alle n Sekunden prüfen
+    /// check the inventory (services, ports, firewall) every n seconds
     #[serde(default = "default_inventory_interval")]
     pub inventory_interval_s: u64,
-    /// Aktionen, die die Zentrale auslösen darf (restore, quarantine, block_ip). Standard: keine.
-    /// Nur lokal per `tyrosecd actions enable` änderbar – eine übernommene Zentrale kann sie nicht einschalten.
+    /// actions the central server may trigger (restore, quarantine, block_ip). Default: none.
+    /// Can only be changed locally via `tyrosecd actions enable` – a compromised central server cannot enable them.
     #[serde(default)]
     pub actions: Vec<String>,
-    /// zusätzliche Ordner (außer den erkannten Webroots), in denen Wiederherstellen erlaubt ist – landen im
-    /// systemd-Drop-in (`ReadWritePaths=`). Nur lokal per `tyrosecd actions enable --path …` änderbar.
+    /// additional directories (besides the detected webroots) in which restoring is allowed – they end up in the
+    /// systemd drop-in (`ReadWritePaths=`). Can only be changed locally via `tyrosecd actions enable --path …`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub action_paths: Vec<String>,
 }
@@ -102,22 +102,22 @@ fn default_metrics_interval() -> u64 {
     15
 }
 
-/// Adresse der Zentrale seit 17.11.2026: Port 443 auf eigener IP – ein späterer Umzug ist nur noch eine DNS-Änderung.
+/// Address of the central server since 2026-11-17: port 443 on its own IP – a later move is just a DNS change.
 pub const SERVER_DEFAULT: &str = "https://ingest.tyrosec.com";
-/// Frühere Standardadressen, die der Agent selbst auf `SERVER_DEFAULT` umstellt (nur genau diese; eigene
-/// Adressen, Self-hosted und Tests bleiben unangetastet).
+/// Former default addresses that the agent itself switches to `SERVER_DEFAULT` (exactly these only; custom
+/// addresses, self-hosted and tests stay untouched).
 pub const SERVER_LEGACY: &[&str] = &["https://app.tyrosec.com:8443"];
 
-/// Muss die Adresse umgestellt werden? Nur exakt eine frühere Standardadresse (mit oder ohne „/“ am Ende).
+/// Does the address need to be switched? Only an exact former default address (with or without a trailing "/").
 pub fn legacy_server(server: &str) -> bool {
     SERVER_LEGACY.contains(&server.trim_end_matches('/'))
 }
 
 impl AgentConfig {
     pub fn load(path: &str) -> Result<AgentConfig> {
-        let s = std::fs::read_to_string(path).with_context(|| format!("Konfiguration {path}"))?;
+        let s = std::fs::read_to_string(path).with_context(|| format!("configuration {path}"))?;
         let mut c: AgentConfig = toml::from_str(&s)?;
-        // frühe Installationen (vor dem Domainwechsel) haben den Platzhalter als einzige Update-Quelle gespeichert
+        // early installations (before the domain change) stored the placeholder as their only update source
         for u in c.update_sources.iter_mut() {
             if u.starts_with("https://get.tyrosd.example") {
                 *u = crate::update::DEFAULT_UPDATE_SOURCES[0].to_string();
@@ -143,7 +143,7 @@ impl AgentConfig {
     pub fn cert_path(&self) -> String {
         format!("{}/agent.crt", self.data_dir)
     }
-    /// CA für das Server-Zertifikat (nur Self-hosted/Test; sonst Web-PKI)
+    /// CA for the server certificate (self-hosted/test only; otherwise Web PKI)
     pub fn server_ca_path(&self) -> String {
         format!("{}/server-ca.crt", self.data_dir)
     }

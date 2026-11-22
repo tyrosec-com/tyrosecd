@@ -1,10 +1,10 @@
-//! fanotify-Backend: `FAN_MARK_FILESYSTEM` + `FAN_REPORT_DFID_NAME`
-//! (Kernel ≥ 5.9). Pfade über `open_by_handle_at` + `/proc/self/fd`,
-//! Prozess über die gelieferte PID + /proc (sofort gelesen).
+//! fanotify backend: `FAN_MARK_FILESYSTEM` + `FAN_REPORT_DFID_NAME`
+//! (kernel ≥ 5.9). Paths via `open_by_handle_at` + `/proc/self/fd`,
+//! process via the delivered PID + /proc (read immediately).
 //!
-//! Braucht `CAP_SYS_ADMIN` (fanotify) und `CAP_DAC_READ_SEARCH`
-//! (open_by_handle_at). Direkte Syscalls, damit es mit musl ohne
-//! libc-Wrapper funktioniert.
+//! Requires `CAP_SYS_ADMIN` (fanotify) and `CAP_DAC_READ_SEARCH`
+//! (open_by_handle_at). Direct syscalls so that it works with musl without
+//! libc wrappers.
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -21,7 +21,7 @@ use tyrosd_core::{Backend, Op, RawEvent};
 pub mod decoy;
 pub mod exec;
 
-// --- Konstanten aus <linux/fanotify.h> ---
+// --- Constants from <linux/fanotify.h> ---
 const FAN_CLOEXEC: u32 = 0x0000_0001;
 const FAN_CLASS_NOTIF: u32 = 0x0000_0000;
 const FAN_UNLIMITED_QUEUE: u32 = 0x0000_0010;
@@ -47,21 +47,21 @@ const FAN_EVENT_INFO_TYPE_DFID_NAME: u8 = 2;
 const FAN_EVENT_INFO_TYPE_DFID: u8 = 3;
 
 const METADATA_LEN: usize = 24;
-/// Obergrenze Pfad-Cache (Verzeichnis-Handles → Pfad). Praxisfall Desktop-Rechner: 792 000 Ordner, 1 Mio. Einträge à
-/// ~190 B hätten die Speichergrenze des Dienstes (256 MB) gesprengt → kompakte Einträge (PathCache) und kleinere Grenzen.
+/// Upper limit of the path cache (directory handles → path). Real case desktop: 792,000 directories, 1 M entries at
+/// ~190 B would have blown the service's memory limit (256 MB) → compact entries (PathCache) and smaller limits.
 const HANDLE_CACHE_MAX: usize = 400_000;
-/// höchstens so viele Ordner beim Start vorab auflösen (wichtige Orte zuerst, siehe PREWARM_FIRST)
+/// pre-resolve at most this many directories at startup (important places first, see PREWARM_FIRST)
 const PREWARM_MAX: usize = 200_000;
-/// Diese Orte zuerst vorab auflösen: dort zählt die Zuordnung gelöschter Ordner (Webshells, Nachladen, Persistenz)
+/// Pre-resolve these places first: mapping deleted directories matters there (webshells, payload download, persistence)
 const PREWARM_FIRST: &[&str] = &["/etc", "/var/www", "/srv", "/root", "/tmp", "/var/tmp", "/dev/shm", "/opt", "/usr/local",
     "/var/spool/cron", "/usr/lib/systemd", "/lib/systemd"];
-/// Ordnernamen, deren Inhalt nicht vorab aufgelöst wird (Caches, Pakete, Versionsverwaltung) – bei Ereignissen werden
-/// sie trotzdem normal aufgelöst, nur nicht auf Vorrat
+/// Directory names whose contents are not pre-resolved (caches, packages, version control) – on events they are
+/// still resolved normally, just not in advance
 const PREWARM_SKIP: &[&str] = &[".cache", "node_modules", ".git", ".npm", ".cargo", ".rustup", ".mozilla", ".local",
     ".vscode-server", ".gradle", ".m2", "__pycache__", "snap", ".thumbnails", "Cache", "CacheStorage", "Code Cache"];
 
-/// Ordner-Handle → Pfad, kompakt: 128-Bit-Prüfwert statt kopierter Kennung (spart Kennung + Vec-Kopf), Pfad ohne
-/// Reserve-Kapazität. Wird die Grenze erreicht, beginnt der Cache neu (Pfade werden bei Bedarf wieder aufgelöst).
+/// Directory handle → path, compact: 128-bit checksum instead of a copied handle (saves handle + Vec header), path w/o
+/// spare capacity. When the limit is reached, the cache starts over (paths are resolved again on demand).
 pub(crate) struct PathCache {
     map: HashMap<u128, Box<str>>,
     max: usize,
@@ -97,14 +97,14 @@ impl PathCache {
         self.map.clear();
     }
 
-    #[allow(dead_code)] // Tests, Statistik
+    #[allow(dead_code)] // tests, statistics
     pub(crate) fn len(&self) -> usize {
         self.map.len()
     }
 }
 const FANOTIFY_METADATA_VERSION: u8 = 3;
 
-/// Dateisysteme, die markiert werden (Rest: nur Scan).
+/// File systems that are marked (rest: scan only).
 const FS_TYPES: &[&str] =
     &["ext2", "ext3", "ext4", "xfs", "btrfs", "f2fs", "jfs", "reiserfs", "tmpfs", "overlay", "zfs", "bcachefs"];
 
@@ -115,7 +115,7 @@ pub struct MountInfo {
     pub dev: String,
 }
 
-/// /proc/self/mountinfo lesen.
+/// Read /proc/self/mountinfo.
 pub fn mounts() -> Vec<MountInfo> {
     let s = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
     s.lines()
@@ -132,7 +132,7 @@ pub fn mounts() -> Vec<MountInfo> {
 }
 
 fn unescape(s: &str) -> String {
-    // mountinfo kodiert Leerzeichen etc. oktal (\040)
+    // mountinfo encodes spaces etc. in octal (\040)
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
@@ -151,7 +151,7 @@ fn unescape(s: &str) -> String {
 }
 
 fn fanotify_init(flags: u32) -> std::io::Result<OwnedFd> {
-    // SAFETY: Syscall ohne Zeiger.
+    // SAFETY: syscall without pointers.
     let fd = unsafe {
         libc::syscall(
             libc::SYS_fanotify_init,
@@ -162,13 +162,13 @@ fn fanotify_init(flags: u32) -> std::io::Result<OwnedFd> {
     if fd < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    // SAFETY: fd ist frisch und gehört uns.
+    // SAFETY: fd is fresh and belongs to us.
     Ok(unsafe { OwnedFd::from_raw_fd(fd as i32) })
 }
 
 fn fanotify_mark(fd: i32, flags: u32, mask: u64, path: &str) -> std::io::Result<()> {
     let c = CString::new(path).map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?;
-    // SAFETY: c lebt bis nach dem Aufruf.
+    // SAFETY: c lives until after the call.
     let r = unsafe {
         libc::syscall(
             libc::SYS_fanotify_mark,
@@ -186,7 +186,7 @@ fn fanotify_mark(fd: i32, flags: u32, mask: u64, path: &str) -> std::io::Result<
     }
 }
 
-/// Prüft, ob fanotify mit DFID_NAME verfügbar ist (Kernel ≥ 5.9, Rechte).
+/// Checks whether fanotify with DFID_NAME is available (kernel ≥ 5.9, permissions).
 pub fn probe() -> Result<()> {
     let fd = fanotify_init(FAN_CLOEXEC | FAN_CLASS_NOTIF | FAN_REPORT_DFID_NAME)
         .context("fanotify_init(FAN_REPORT_DFID_NAME)")?;
@@ -198,11 +198,11 @@ pub fn probe() -> Result<()> {
 fn fsid_of(path: &str) -> Option<[i32; 2]> {
     let c = CString::new(path).ok()?;
     let mut st: libc::statfs = unsafe { std::mem::zeroed() };
-    // SAFETY: gültiger Pfad und Puffer.
+    // SAFETY: valid path and buffer.
     if unsafe { libc::statfs(c.as_ptr(), &mut st) } != 0 {
         return None;
     }
-    // SAFETY: fsid_t ist 2×int (8 Byte), Felder sind in libc privat.
+    // SAFETY: fsid_t is 2×int (8 bytes), the fields are private in libc.
     Some(unsafe { std::mem::transmute::<libc::fsid_t, [i32; 2]>(st.f_fsid) })
 }
 
@@ -215,7 +215,7 @@ pub struct MarkResult {
 
 pub struct FanotifySource {
     fd: OwnedFd,
-    /// fsid → offenes Verzeichnis auf dem Dateisystem (für open_by_handle_at)
+    /// fsid → open directory on the file system (for open_by_handle_at)
     mount_fds: HashMap<[i32; 2], OwnedFd>,
     roots: Vec<String>,
     policy: Arc<Policy>,
@@ -223,18 +223,18 @@ pub struct FanotifySource {
     proc_cache: HashMap<i32, (Instant, ProcInfo)>,
     self_pid: i32,
     pub marks: Vec<MarkResult>,
-    /// vorab aufgelöste Verzeichnisse
+    /// pre-resolved directories
     pub prewarmed: usize,
-    /// Ereignisse ohne auflösbaren Pfad
+    /// events without a resolvable path
     pub unresolved: u64,
-    /// Ereignisse aus Verzeichnissen, die in unserem Mount-Namespace nicht sichtbar sind (z. B. tmpfs eines Containers)
+    /// events from directories not visible in our mount namespace (e.g. a container's tmpfs)
     pub foreign: u64,
 }
 
 impl FanotifySource {
-    /// Kernel-Warteschlange für fanotify vergrößern (ab Kernel 5.13 als sysctl; Standard 16 384). Nur wenn die
-    /// systemd-Unit /proc/sys/fs/fanotify beschreibbar macht (Neuinstallationen ab 0.5.3) – sonst bleibt der Standard.
-    /// Liefert (vorher, nachher) oder None, wenn nicht möglich.
+    /// Enlarge the kernel queue for fanotify (sysctl since kernel 5.13; default 16,384). Only if the
+    /// systemd unit makes /proc/sys/fs/fanotify writable (new installations since 0.5.3) – otherwise the default stays.
+    /// Returns (before, after) or None if not possible.
     pub fn raise_queue_limit(want: u64) -> Option<(u64, u64)> {
         let p = "/proc/sys/fs/fanotify/max_queued_events";
         let cur: u64 = std::fs::read_to_string(p).ok()?.trim().parse().ok()?;
@@ -252,10 +252,10 @@ impl FanotifySource {
             flags |= FAN_UNLIMITED_QUEUE;
         }
         let fd = fanotify_init(flags).context("fanotify_init")?;
-        // FAN_MODIFY meldet jeden einzelnen write() – eine Sicherung, die eine große Datei schreibt, erzeugte so Tausende
-        // Ereignisse und ließ die Warteschlange überlaufen (Praxisfall: 236 bzw. 166 Überläufe auf zwei Servern in
-        // 7 Tagen). FAN_CLOSE_WRITE meldet die fertig geschriebene Datei einmal; dauerhaft offene Dateien (Datenbanken,
-        // Protokolle – größtenteils ausgenommen) erscheinen erst beim Schließen.
+        // FAN_MODIFY reports every single write() – a backup writing a large file thus produced thousands of
+        // events and made the queue overflow (real case: 236 and 166 overflows on two servers in
+        // 7 days). FAN_CLOSE_WRITE reports the fully written file once; permanently open files (databases,
+        // logs – mostly excluded) only appear when closed.
         let mask = FAN_CLOSE_WRITE | FAN_ATTRIB | FAN_CREATE | FAN_DELETE | FAN_MOVED_FROM | FAN_MOVED_TO | FAN_ONDIR;
         let mut s = FanotifySource {
             fd,
@@ -275,7 +275,7 @@ impl FanotifySource {
             if !FS_TYPES.contains(&m.fstype.as_str()) {
                 continue;
             }
-            // nur Mounts, die eine Wurzel betreffen
+            // only mounts that concern a root
             let relevant = roots.iter().any(|r| {
                 m.mount_point.starts_with(r.as_str()) || r.starts_with(m.mount_point.as_str())
             });
@@ -284,15 +284,15 @@ impl FanotifySource {
             }
             let Some(fsid) = fsid_of(&m.mount_point) else { continue };
             if !seen_dev.insert((m.dev.clone(), fsid)) {
-                continue; // Bind-Mount desselben Dateisystems
+                continue; // bind mount of the same file system
             }
             let r = fanotify_mark(s.fd.as_raw_fd(), FAN_MARK_ADD | FAN_MARK_FILESYSTEM, mask, &m.mount_point);
             if r.is_ok() && !s.mount_fds.contains_key(&fsid) {
                 let c = CString::new(m.mount_point.clone()).unwrap();
-                // SAFETY: gültiger Pfad
+                // SAFETY: valid path
                 let mfd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
                 if mfd >= 0 {
-                    // SAFETY: frischer fd
+                    // SAFETY: fresh fd
                     s.mount_fds.insert(fsid, unsafe { OwnedFd::from_raw_fd(mfd) });
                 }
             }
@@ -304,20 +304,20 @@ impl FanotifySource {
             });
         }
         if !s.marks.iter().any(|m| m.ok) {
-            bail!("kein Dateisystem markiert");
+            bail!("no file system marked");
         }
         s.prewarm();
         Ok(s)
     }
 
-    /// Verzeichnis-Handles vorab auflösen (name_to_handle_at). Sonst lassen sich
-    /// Ereignisse aus Verzeichnissen, die schon gelöscht sind, bevor wir sie
-    /// lesen (`rm -rf` direkt nach dem Start), keinem Pfad mehr zuordnen.
+    /// Pre-resolve directory handles (name_to_handle_at). Otherwise events from
+    /// directories that are already deleted before we read them
+    /// (`rm -rf` right after the start) can no longer be mapped to a path.
     fn prewarm(&mut self) {
         use std::os::unix::fs::MetadataExt;
         let mut fsid_by_dev: HashMap<u64, [i32; 2]> = HashMap::new();
         let mut n = 0usize;
-        // Durchgang 1: wichtige Orte (innerhalb der Wurzeln), Durchgang 2: der Rest der Wurzeln ohne diese Orte
+        // Pass 1: important places (inside the roots), pass 2: the rest of the roots without these places
         let first: Vec<String> = PREWARM_FIRST.iter().filter(|d| self.in_roots(d) && std::path::Path::new(d).is_dir()).map(|d| d.to_string()).collect();
         let passes: Vec<(Vec<String>, bool)> = vec![(first.clone(), false), (self.roots.clone(), true)];
         'outer: for (starts, skip_first) in passes {
@@ -330,7 +330,7 @@ impl FanotifySource {
                 }
                 let p = e.path().to_string_lossy().into_owned();
                 if skip_first && first.contains(&p) {
-                    it.skip_current_dir(); // schon in Durchgang 1
+                    it.skip_current_dir(); // already in pass 1
                     continue;
                 }
                 if e.depth() > 0 && e.file_name().to_str().is_some_and(|n| PREWARM_SKIP.contains(&n)) {
@@ -344,7 +344,7 @@ impl FanotifySource {
                 let Ok(md) = e.metadata() else { continue };
                 let fsid = *fsid_by_dev.entry(md.dev()).or_insert_with(|| fsid_of(&p).unwrap_or([0, 0]));
                 if !self.mount_fds.contains_key(&fsid) {
-                    it.skip_current_dir(); // Dateisystem nicht markiert
+                    it.skip_current_dir(); // file system not marked
                     continue;
                 }
                 if let Some(h) = name_to_handle(&p) {
@@ -366,11 +366,11 @@ impl FanotifySource {
             return Some(p.to_string());
         }
         let mfd = self.mount_fds.get(&fsid)?.as_raw_fd();
-        // file_handle mit 4-Byte-Ausrichtung kopieren
+        // copy file_handle with 4-byte alignment
         let mut buf = vec![0u32; handle.len().div_ceil(4) + 1];
-        // SAFETY: buf ist groß genug für handle.len() Bytes
+        // SAFETY: buf is large enough for handle.len() bytes
         unsafe { std::ptr::copy_nonoverlapping(handle.as_ptr(), buf.as_mut_ptr() as *mut u8, handle.len()) };
-        // SAFETY: buf enthält ein gültiges struct file_handle
+        // SAFETY: buf contains a valid struct file_handle
         let fd = unsafe {
             libc::syscall(
                 libc::SYS_open_by_handle_at,
@@ -382,13 +382,13 @@ impl FanotifySource {
         if fd < 0 {
             return None;
         }
-        // SAFETY: frischer fd
+        // SAFETY: fresh fd
         let owned = unsafe { OwnedFd::from_raw_fd(fd as i32) };
         let p = std::fs::read_link(format!("/proc/self/fd/{}", owned.as_raw_fd())).ok()?;
         let mut p = p.to_string_lossy().into_owned();
-        // Liegt das Verzeichnis außerhalb dessen, was unser Mount-Namespace sieht (Container-tmpfs, Mount nur im Namespace
-        // eines Dienstes), liefert readlink einen Pfad relativ zur Wurzel jenes Dateisystems („/log.json“ statt des echten
-        // Orts). Gegenprobe: Der Pfad muss bei uns auf genau dieses Objekt zeigen – sonst „fremd“ (leerer Pfad).
+        // If the directory is outside what our mount namespace sees (container tmpfs, mount only in the namespace
+        // of a service), readlink returns a path relative to the root of that file system ("/log.json" instead of the real
+        // location). Cross-check: the path must point to exactly this object for us – otherwise "foreign" (empty path).
         if !p.ends_with(" (deleted)") && !same_object(owned.as_raw_fd(), &p) {
             p = String::new();
         }
@@ -414,13 +414,13 @@ impl FanotifySource {
         self.roots.iter().any(|r| r == "/" || p == r || p.starts_with(&format!("{}/", r.trim_end_matches('/'))))
     }
 
-    /// Ereignisschleife (blockiert).
+    /// Event loop (blocking).
     pub fn run(mut self, deb: Arc<Debouncer>, on_overflow: impl Fn()) -> Result<()> {
         let mut buf = vec![0u8; 256 * 1024];
         let mut moved_from: Option<String> = None;
         let mut last_unresolved = Instant::now() - std::time::Duration::from_secs(5);
         loop {
-            // SAFETY: buf ist gültig
+            // SAFETY: buf is valid
             let n = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n < 0 {
                 let e = std::io::Error::last_os_error();
@@ -443,7 +443,7 @@ impl FanotifySource {
                     break;
                 }
                 if efd >= 0 {
-                    // SAFETY: fd vom Kernel, wir schließen ihn
+                    // SAFETY: fd from the kernel, we close it
                     unsafe { libc::close(efd) };
                 }
                 if mask & FAN_Q_OVERFLOW != 0 {
@@ -460,7 +460,7 @@ impl FanotifySource {
                     off += event_len;
                     continue;
                 }
-                // Info-Records parsen
+                // parse info records
                 let mut path: Option<String> = None;
                 let mut stale = false;
                 let mut foreign = false;
@@ -517,8 +517,8 @@ impl FanotifySource {
                 }
 
                 let Some(path) = path else {
-                    // Pfad nicht auflösbar (Verzeichnis schon gelöscht): nicht still
-                    // verwerfen, sondern Abgleich-Scan anstoßen (höchstens 1×/s).
+                    // Path not resolvable (directory already deleted): do not silently
+                    // discard, but trigger a reconciliation scan (at most 1×/s).
                     self.unresolved += 1;
                     if mask & (FAN_DELETE | FAN_MOVED_FROM | FAN_MODIFY | FAN_CREATE) != 0
                         && pid != self.self_pid
@@ -543,9 +543,9 @@ impl FanotifySource {
                 }
                 let is_dir = mask & FAN_ONDIR != 0;
                 if is_dir {
-                    // Verzeichnis-Umbenennung → Pfad-Cache ungültig. Bei DELETE den
-                    // Cache NICHT leeren: Ereignisse aus dem gelöschten Verzeichnis
-                    // stehen evtl. noch in der Queue und brauchen den alten Pfad (T19).
+                    // Directory rename → path cache invalid. On DELETE do NOT
+                    // clear the cache: events from the deleted directory may
+                    // still be in the queue and need the old path (T19).
                     if mask & (FAN_MOVED_FROM | FAN_MOVED_TO) != 0 {
                         self.handle_cache.clear();
                     }
@@ -578,13 +578,13 @@ impl FanotifySource {
     }
 }
 
-/// Zeigt `path` in unserem Namespace auf dasselbe Objekt wie `fd` (Gerät + Inode)?
+/// Does `path` in our namespace point to the same object as `fd` (device + inode)?
 fn same_object(fd: i32, path: &str) -> bool {
     use std::os::unix::fs::MetadataExt;
-    // SAFETY: st wird von fstat gefüllt, fd ist gültig (O_PATH erlaubt fstat)
+    // SAFETY: st is filled by fstat, fd is valid (O_PATH allows fstat)
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     if unsafe { libc::fstat(fd, &mut st) } != 0 {
-        return true; // im Zweifel behalten
+        return true; // keep when in doubt
     }
     match std::fs::symlink_metadata(path) {
         Ok(m) => m.dev() == st.st_dev as u64 && m.ino() == st.st_ino as u64,
@@ -592,7 +592,7 @@ fn same_object(fd: i32, path: &str) -> bool {
     }
 }
 
-/// Datei-Handle eines Pfads (gleiches Format wie in den fanotify-Info-Records:
+/// File handle of a path (same format as in the fanotify info records:
 /// handle_bytes, handle_type, f_handle).
 fn name_to_handle(path: &str) -> Option<Vec<u8>> {
     const MAX_HANDLE_SZ: u32 = 128;
@@ -600,7 +600,7 @@ fn name_to_handle(path: &str) -> Option<Vec<u8>> {
     let mut buf = vec![0u32; (8 + MAX_HANDLE_SZ as usize) / 4];
     buf[0] = MAX_HANDLE_SZ;
     let mut mount_id: libc::c_int = 0;
-    // SAFETY: buf ist groß genug (struct file_handle + 128 Byte), Zeiger gültig.
+    // SAFETY: buf is large enough (struct file_handle + 128 bytes), pointers valid.
     let r = unsafe {
         libc::syscall(
             libc::SYS_name_to_handle_at,
@@ -615,7 +615,7 @@ fn name_to_handle(path: &str) -> Option<Vec<u8>> {
         return None;
     }
     let hb = (buf[0] as usize).min(MAX_HANDLE_SZ as usize);
-    // SAFETY: buf enthält mindestens 8 + hb Bytes
+    // SAFETY: buf contains at least 8 + hb bytes
     let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, 8 + hb) };
     Some(bytes.to_vec())
 }
@@ -636,7 +636,7 @@ mod path_cache_tests {
         pc.insert(b, "/etc");
         pc.insert(c, "/tmp");
         assert_eq!(pc.len(), 3);
-        pc.insert(PathCache::key([9, 9], &[1]), "/srv"); // Grenze erreicht → neu beginnen
+        pc.insert(PathCache::key([9, 9], &[1]), "/srv"); // limit reached → start over
         assert_eq!(pc.len(), 1);
         assert_eq!(pc.get(a), None);
     }
@@ -652,7 +652,7 @@ mod path_cache_mem {
             .find(|l| l.starts_with("VmRSS")).unwrap().split_whitespace().nth(1).unwrap().parse().unwrap()
     }
 
-    /// Speichervergleich alt (Vec-Schlüssel + String) gegen PathCache: `cargo test -- --ignored --nocapture mem_compare`
+    /// Memory comparison old (Vec key + String) vs. PathCache: `cargo test -- --ignored --nocapture mem_compare`
     #[test]
     #[ignore]
     fn mem_compare() {
@@ -671,11 +671,11 @@ mod path_cache_mem {
             k.extend_from_slice(&[8, 0, 0, 0, 1, 0, 0, 0]);
             k.extend_from_slice(&(i as u64).to_ne_bytes());
             let mut p = path(i);
-            p.reserve(8); // wie read_link/format!: oft Reserve-Kapazität
+            p.reserve(8); // like read_link/format!: often spare capacity
             old.insert(k, p);
         }
         let r1 = rss_kb();
-        println!("alt: {} MB, neu: {} MB (je {} Einträge)", (r1 - r0) / 1024, (q1 - q0) / 1024, n);
+        println!("old: {} MB, new: {} MB ({} entries each)", (r1 - r0) / 1024, (q1 - q0) / 1024, n);
         assert!(pc.get(PathCache::key([1, 2], &0u64.to_ne_bytes())).is_some() && !old.is_empty());
     }
 }

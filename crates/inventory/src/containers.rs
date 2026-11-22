@@ -1,6 +1,6 @@
-//! Container erkennen und mit ihren eigenen Paketen inventarisieren (Plan „Spitze“, B):
-//! systemd-nspawn, Docker, Podman, LXC/Incus, Kubernetes. Erkennung über die Wurzel der Prozesse
-//! (`/proc/<pid>/root` mit anderem Gerät/Inode als `/`), Zugriff auf die Dateien über diesen Pfad.
+//! Detect containers and inventory them with their own packages (plan "peak", B):
+//! systemd-nspawn, Docker, Podman, LXC/Incus, Kubernetes. Detection via the root of the processes
+//! (`/proc/<pid>/root` with a different device/inode than `/`), file access through that path.
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::os::unix::fs::MetadataExt;
@@ -8,7 +8,7 @@ use std::os::unix::fs::MetadataExt;
 use crate::software::{self, Package};
 use tyrosd_check::rootfs::{self, FsRoot};
 
-/// Höchstlänge von Container-Namen und Hostnamen an die Zentrale
+/// Maximum length of container names and hostnames sent to the server
 pub const NAME_MAX: usize = 64;
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -21,15 +21,15 @@ pub struct Container {
     pub state: String,
     pub os: String,
     pub ecosystem: String,
-    /// `ID` und `VERSION_ID` aus os-release des Containers (Support-Ende des Basis-Images)
+    /// `ID` and `VERSION_ID` from the container's os-release (end of support of the base image)
     pub os_id: String,
     pub os_version: String,
     pub packages: usize,
-    /// Docker: Kennung der Schreibschicht (overlay2/<upper>/diff), damit die Zentrale Datei-Ereignisse dem Namen zuordnen kann
+    /// Docker: ID of the writable layer (overlay2/<upper>/diff), so the server can map file events to the name
     pub upper: String,
 }
 
-/// Docker: (Name, Kennung der Schreibschicht) zur vollen Container-ID
+/// Docker: (name, ID of the writable layer) for the full container ID
 fn docker_meta(full_id: &str) -> (String, String) {
     let name = std::fs::read_to_string(format!("/var/lib/docker/containers/{full_id}/config.v2.json"))
         .ok()
@@ -46,7 +46,7 @@ fn full_docker_id(cgroup: &str) -> Option<String> {
 
 pub const MAX: usize = 50;
 
-/// Art und Name aus der cgroup eines Prozesses
+/// Kind and name from the cgroup of a process
 pub fn classify(cgroup: &str) -> (String, String) {
     let c = cgroup.lines().map(|l| l.rsplit(':').next().unwrap_or("")).collect::<Vec<_>>().join("\n");
     let after = |pat: &str| c.find(pat).map(|i| c[i + pat.len()..].split(['/', '.', '\n']).next().unwrap_or("").to_string());
@@ -77,7 +77,7 @@ fn pretty_os(fs: &FsRoot) -> String {
     s.lines().find_map(|l| l.strip_prefix("PRETTY_NAME=")).map(|v| rootfs::cap_name(v.trim_matches('"'), 128)).unwrap_or_default()
 }
 
-/// Pakete eines Containers mit Fundort „container:<name>“ (auch WordPress/Composer/npm in dessen Webroots)
+/// Packages of a container with location "container:<name>" (also WordPress/Composer/npm in its webroots)
 fn inspect(fs: &FsRoot, name: &str) -> (String, String, Vec<Package>) {
     let eco = software::ecosystem_of(software::os_release_in(fs));
     let loc = format!("container:{name}");
@@ -93,14 +93,14 @@ fn inspect(fs: &FsRoot, name: &str) -> (String, String, Vec<Package>) {
     (pretty_os(fs), eco, pk)
 }
 
-/// Laufende Container (über /proc) und gestoppte nspawn-Maschinen → (Container, ihre Pakete)
+/// Running containers (via /proc) and stopped nspawn machines → (container, its packages)
 pub fn detect() -> (Vec<Container>, Vec<Package>) {
     detect_at("/proc", "/var/lib/machines")
 }
 
 pub fn detect_at(proc_dir: &str, machines: &str) -> (Vec<Container>, Vec<Package>) {
     let host = std::fs::metadata("/").map(|m| (m.dev(), m.ino())).unwrap_or((0, 0));
-    // je Wurzel ein Prozess (der mit der kleinsten PID)
+    // one process per root (the one with the lowest PID)
     let mut roots: BTreeMap<(u64, u64), u32> = BTreeMap::new();
     if let Ok(rd) = std::fs::read_dir(proc_dir) {
         for e in rd.flatten() {
@@ -118,8 +118,8 @@ pub fn detect_at(proc_dir: &str, machines: &str) -> (Vec<Container>, Vec<Package
     let mut seen_names = std::collections::HashSet::new();
     for (_, pid) in roots.into_iter().take(MAX) {
         let root = format!("{proc_dir}/{pid}/root");
-        // Dateien des Containers nur über openat2 relativ zur Wurzel; ohne openat2
-        // (Kernel < 5.6) wird der Container nicht inventarisiert statt unsicher gelesen
+        // Container files only via openat2 relative to the root; without openat2
+        // (kernel < 5.6) the container is not inventoried rather than read unsafely
         let Ok(fs) = FsRoot::contained(&root) else { continue };
         let cg = std::fs::read_to_string(format!("{proc_dir}/{pid}/cgroup")).unwrap_or_default();
         let (kind, mut name) = classify(&cg);
@@ -142,14 +142,14 @@ pub fn detect_at(proc_dir: &str, machines: &str) -> (Vec<Container>, Vec<Package
         }
         let (os, eco, pk) = inspect(&fs, &name);
         if (os.is_empty() || kind == "container") && pk.is_empty() {
-            continue; // Schutzräume ohne eigene Paketverwaltung (Snap/Ubuntu Core, Browser-Sandbox, systemd) sind keine Container
+            continue; // sandboxes without own package management (Snap/Ubuntu Core, browser sandbox, systemd): no container
         }
         seen_names.insert(name.clone());
         let (os_id, os_version) = software::os_release_in(&fs);
         out.push(Container { id: name.clone(), name: name.clone(), kind, state: "running".into(), os, ecosystem: eco, os_id, os_version, packages: pk.len(), upper });
         pkgs.extend(pk);
     }
-    // gestoppte nspawn-Maschinen
+    // stopped nspawn machines
     if let Ok(rd) = std::fs::read_dir(machines) {
         for e in rd.flatten().take(MAX) {
             let name = rootfs::cap_name(&e.file_name().to_string_lossy(), NAME_MAX);
@@ -200,11 +200,11 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    /// Feindliche Wurzel: Symlinks auf Host-Dateien und Geräte, überlange Namen
+    /// Hostile root: symlinks to host files and devices, overlong names
     #[test]
     fn hostile_root_is_read_safely() {
         if !FsRoot::openat2_supported() {
-            eprintln!("openat2 nicht verfügbar – Test übersprungen");
+            eprintln!("openat2 not available – test skipped");
             return;
         }
         use std::os::unix::fs::symlink;
@@ -222,9 +222,9 @@ mod tests {
         let (c, p) = detect_at(empty.to_str().unwrap(), base.path().join("machines").to_str().unwrap());
         assert_eq!(c.len(), 1);
         assert_eq!(c[0].name.chars().count(), NAME_MAX);
-        assert_eq!((c[0].os.as_str(), c[0].os_id.as_str(), c[0].packages), ("", "", 0), "keine Host-Datei, kein Gerät gelesen");
+        assert_eq!((c[0].os.as_str(), c[0].os_id.as_str(), c[0].packages), ("", "", 0), "no host file, no device read");
         assert!(p.is_empty());
-        // Hostname aus einer Container-Wurzel: gekürzt, ohne Steuerzeichen
+        // Hostname from a container root: truncated, without control characters
         std::fs::write(m.join("etc/hostname"), format!("{}\n\u{1b}x", "h".repeat(100))).unwrap();
         let fs = FsRoot::contained(&m.to_string_lossy()).unwrap();
         assert_eq!(hostname_in(&fs), "h".repeat(NAME_MAX));

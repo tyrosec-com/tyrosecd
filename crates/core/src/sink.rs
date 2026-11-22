@@ -3,13 +3,13 @@ use std::sync::Mutex;
 
 use crate::event::Event;
 
-/// Ziel für fertige Ereignisse (lokale Datei, Spool zur Zentrale, …).
+/// Destination for finished events (local file, spool to the central server, …).
 pub trait Sink: Send + Sync {
     fn emit(&self, e: &Event);
 }
 
-/// Schreibt Ereignisse als JSON-Zeilen (Datei oder stdout), sofort geflusht.
-/// Diff/Inhalt (binär) werden dabei nicht geschrieben.
+/// Writes events as JSON lines (file or stdout), flushed immediately.
+/// Diff/content (binary) are not written.
 pub struct JsonlSink {
     out: Mutex<Box<dyn Write + Send>>,
     pub count: std::sync::atomic::AtomicU64,
@@ -41,7 +41,7 @@ impl Sink for JsonlSink {
     }
 }
 
-/// Mehrere Ziele zugleich.
+/// Several destinations at once.
 pub struct MultiSink(pub Vec<Box<dyn Sink>>);
 
 impl Sink for MultiSink {

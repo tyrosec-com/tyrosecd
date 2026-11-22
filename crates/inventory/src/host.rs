@@ -1,6 +1,6 @@
-//! Härtungs-relevante Systemangaben für den Sicherheitswert (Plan B2):
-//! effektive SSH-Server-Einstellungen und „Neustart nötig“.
-//! Nur Dateien lesen – kein `sshd -T`, kein Prozessstart.
+//! Hardening-relevant system information for the security score (plan B2):
+//! effective SSH server settings and "reboot required".
+//! Only reads files – no `sshd -T`, no process start.
 
 use std::path::Path;
 
@@ -8,9 +8,9 @@ use serde::Serialize;
 
 #[derive(Serialize, Debug, Default, Clone, PartialEq)]
 pub struct Ssh {
-    /// sshd installiert (Konfiguration gefunden)
+    /// sshd installed (configuration found)
     pub present: bool,
-    /// yes | no | prohibit-password | forced-commands-only (Vorgabe: prohibit-password)
+    /// yes | no | prohibit-password | forced-commands-only (default: prohibit-password)
     pub permit_root_login: String,
     pub password_authentication: bool,
     pub kbd_interactive_authentication: bool,
@@ -18,8 +18,8 @@ pub struct Ssh {
     pub ports: Vec<u16>,
 }
 
-/// sshd-Konfiguration lesen: erster Wert gewinnt (wie sshd), `Include` an Ort und Stelle,
-/// `Match`-Blöcke werden für die globalen Werte ignoriert.
+/// Read the sshd configuration: first value wins (like sshd), `Include` is expanded in place,
+/// `Match` blocks are ignored for the global values.
 pub fn ssh(root: &str) -> Ssh {
     let main = format!("{}/etc/ssh/sshd_config", root.trim_end_matches('/'));
     if !Path::new(&main).exists() {
@@ -34,7 +34,7 @@ pub fn ssh(root: &str) -> Ssh {
         ports.push(22);
     }
     ports.dedup();
-    // ChallengeResponseAuthentication ist der alte Name von KbdInteractiveAuthentication
+    // ChallengeResponseAuthentication is the old name of KbdInteractiveAuthentication
     let kbd = get("kbdinteractiveauthentication").or_else(|| get("challengeresponseauthentication"));
     Ssh {
         present: true,
@@ -60,7 +60,7 @@ fn read_conf(root: &str, path: &str, out: &mut Vec<(String, String)>, depth: u8)
         let key = it.next().unwrap_or("").to_lowercase();
         let val = it.next().unwrap_or("").trim().trim_start_matches('=').trim().trim_matches('"').to_string();
         if key == "match" {
-            return; // ab hier nur bedingte Werte
+            return; // from here on only conditional values
         }
         if key == "include" {
             for pat in val.split_whitespace() {
@@ -79,7 +79,7 @@ fn read_conf(root: &str, path: &str, out: &mut Vec<(String, String)>, depth: u8)
     }
 }
 
-/// einfache Glob-Auflösung für `Include /etc/ssh/sshd_config.d/*.conf`
+/// simple glob expansion for `Include /etc/ssh/sshd_config.d/*.conf`
 fn expand(pat: &str) -> Vec<String> {
     let Some(star) = pat.rfind('*') else { return vec![pat.to_string()] };
     let dir_end = pat[..star].rfind('/').unwrap_or(0);
@@ -97,7 +97,7 @@ fn expand(pat: &str) -> Vec<String> {
 pub struct Reboot {
     pub running_kernel: String,
     pub newest_kernel: String,
-    /// /var/run/reboot-required (Debian/Ubuntu) vorhanden
+    /// /var/run/reboot-required (Debian/Ubuntu) present
     pub flag_file: bool,
     pub required: bool,
 }
@@ -120,7 +120,7 @@ pub fn reboot() -> Reboot {
     Reboot { running_kernel: running, newest_kernel: newest, flag_file: flag, required }
 }
 
-/// Kernel-Versionen numerisch vergleichen: „6.8.0-49-generic“ → [6, 8, 0, 49]
+/// Compare kernel versions numerically: "6.8.0-49-generic" → [6, 8, 0, 49]
 pub fn version_key(v: &str) -> Vec<u64> {
     v.split(|c: char| !c.is_ascii_digit()).filter(|s| !s.is_empty()).filter_map(|s| s.parse().ok()).collect()
 }
@@ -142,7 +142,7 @@ mod tests {
         .unwrap();
         let s = ssh(r);
         assert!(s.present);
-        assert!(s.password_authentication); // Include steht oben → gewinnt (wie bei Ubuntu-Cloud-Images)
+        assert!(s.password_authentication); // Include is at the top → wins (as in Ubuntu cloud images)
         assert_eq!(s.permit_root_login, "yes");
         assert!(!s.kbd_interactive_authentication);
         assert_eq!(s.ports, vec![2222]);
@@ -153,12 +153,12 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let r = d.path().to_str().unwrap();
         std::fs::create_dir_all(format!("{r}/etc/ssh")).unwrap();
-        std::fs::write(format!("{r}/etc/ssh/sshd_config"), "# leer\n").unwrap();
+        std::fs::write(format!("{r}/etc/ssh/sshd_config"), "# empty\n").unwrap();
         let s = ssh(r);
         assert_eq!(s.permit_root_login, "prohibit-password");
         assert!(s.password_authentication);
         assert_eq!(s.ports, vec![22]);
-        assert!(!ssh("/gibt/es/nicht").present);
+        assert!(!ssh("/does/not/exist").present);
     }
 
     #[test]

@@ -1,7 +1,7 @@
-//! Sicherheitsrelevante Server-Gesundheit (Hauptplan 23): CPU, Load, RAM,
-//! Swap, Platten (Belegung + Inodes), Netzwerk-Durchsatz. Erfassung alle
-//! n Sekunden aus /proc und statvfs, Übertragung als 1-Minuten-Aggregate.
-//! Kostet praktisch nichts (wenige Dateien lesen).
+//! Security-relevant server health (master plan 23): CPU, load, RAM,
+//! swap, disks (usage + inodes), network throughput. Sampled every
+//! n seconds from /proc and statvfs, transmitted as 1-minute aggregates.
+//! Costs practically nothing (reads a few files).
 
 pub mod ports;
 use std::collections::HashMap;
@@ -71,7 +71,7 @@ fn disks() -> Vec<DiskUsage> {
         }
         let Ok(c) = CString::new(*mp) else { continue };
         let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-        // SAFETY: gültiger Pfad und Puffer
+        // SAFETY: valid path and buffer
         if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 {
             continue;
         }
@@ -95,7 +95,7 @@ fn load_and_procs() -> (f32, u32) {
     (load, procs)
 }
 
-/// Sammelt Stichproben und liefert pro Minute einen aggregierten Punkt.
+/// Collects samples and yields one aggregated point per minute.
 pub struct Collector {
     last_cpu: Option<CpuTimes>,
     last_net: Option<((u64, u64), Instant)>,
@@ -105,10 +105,10 @@ pub struct Collector {
     net_tx_bps: Vec<u64>,
     window_start: Instant,
     pub window: Duration,
-    /// CPU-Ticks je Prozess am Fensteranfang (Top-Prozesse)
+    /// CPU ticks per process at the start of the window (top processes)
     proc_ticks: HashMap<u32, u64>,
     proc_at: Option<Instant>,
-    /// Verkehr je Port (TCP-Verbindungen)
+    /// Traffic per port (TCP connections)
     ports: ports::PortMeter,
 }
 
@@ -131,7 +131,7 @@ impl Default for Collector {
 }
 
 impl Collector {
-    /// Eine Stichprobe nehmen. Liefert einen Punkt, wenn das Fenster voll ist.
+    /// Take a sample. Returns a point when the window is full.
     pub fn sample(&mut self) -> Option<MetricPoint> {
         if let (Some(prev), Some(cur)) = (self.last_cpu, cpu_times()) {
             let dt = cur.total.saturating_sub(prev.total).max(1) as f32;
@@ -192,14 +192,14 @@ mod tests {
     fn collects_on_linux() {
         let mut c = Collector { window: Duration::from_millis(0), ..Default::default() };
         std::thread::sleep(Duration::from_millis(50));
-        let p = c.sample().expect("Punkt");
+        let p = c.sample().expect("sample");
         assert!(p.mem_total > 0);
         assert!(p.cpu_pct_avg >= 0.0 && p.cpu_pct_avg <= 100.0);
         assert!(!p.disks.is_empty() || std::path::Path::new("/.dockerenv").exists());
     }
 }
 
-/// PSI „some avg60“ in % (Kernel ≥ 4.20 mit CONFIG_PSI); -1 = nicht verfügbar
+/// PSI "some avg60" in % (kernel ≥ 4.20 with CONFIG_PSI); -1 = not available
 fn psi(kind: &str) -> f32 {
     std::fs::read_to_string(format!("/proc/pressure/{kind}"))
         .ok()
@@ -211,20 +211,20 @@ fn psi(kind: &str) -> f32 {
         .unwrap_or(-1.0)
 }
 
-/// utime+stime (Ticks), comm, RSS (kB) eines Prozesses
+/// utime+stime (ticks), comm, RSS (kB) of a process
 fn proc_stat(pid: u32) -> Option<(u64, String, u64)> {
     let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let (l, r) = (s.find('(')?, s.rfind(')')?);
     let comm = s[l + 1..r].to_string();
     let f: Vec<&str> = s[r + 2..].split_whitespace().collect();
-    // nach „)“: state=0 … utime=11, stime=12, rss(Seiten)=21
+    // after ")": state=0 … utime=11, stime=12, rss(pages)=21
     let ticks = f.get(11)?.parse::<u64>().ok()? + f.get(12)?.parse::<u64>().ok()?;
     let rss = f.get(21)?.parse::<u64>().ok()? * 4;
     Some((ticks, comm, rss))
 }
 
 impl Collector {
-    /// Top 5 nach CPU-Anteil seit dem letzten Fenster (ein Kern = 100 %)
+    /// Top 5 by CPU share since the last window (one core = 100 %)
     fn top_procs(&mut self, now: Instant) -> Vec<tyrosd_proto::TopProc> {
         let mut cur = HashMap::new();
         let mut rows = Vec::new();

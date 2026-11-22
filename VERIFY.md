@@ -1,44 +1,37 @@
-# Nachbauen und prüfen / Verify a release
+# Verify a release
 
-Jede offizielle Programmdatei von tyrosecd lässt sich aus diesem Quellcode **bitgenau** nachbauen. So können Sie
-prüfen, dass auf Ihrem Server genau der Code läuft, den Sie hier lesen.
+Every official tyrosecd binary can be rebuilt **bit for bit** from this source code, so you can check that exactly the
+code you are reading here runs on your server.
 
-## Schnell
+## Quick start
 
 ```sh
 git clone https://github.com/tyrosec-com/tyrosecd && cd tyrosecd
-git checkout v0.5.7          # die Version, die auf Ihrem Server läuft: tyrosecd --version
-sh verify.sh 0.5.7           # oder: sh verify.sh 0.5.7 aarch64
+git checkout v0.5.8          # the version running on your server: tyrosecd --version
+sh verify.sh 0.5.8           # or: sh verify.sh 0.5.8 aarch64
 ```
 
-`verify.sh` baut in der festen Umgebung aus [`build/Dockerfile`](build/Dockerfile) (Rust, Zig und cargo-zigbuild mit
-festen Versionen bzw. Prüfsummen, Abhängigkeiten aus `Cargo.lock`) und vergleicht die Prüfsumme mit
-`https://get.tyrosec.com/releases/<Version>/SHA256SUMS`. Ergebnis „identisch“ = die offizielle Datei entsteht aus
-genau diesem Stand.
+`verify.sh` builds in the pinned environment from [`build/Dockerfile`](build/Dockerfile) (Rust, Zig and
+cargo-zigbuild with fixed versions or checksums, dependencies from `Cargo.lock`) and compares the checksum with
+`https://get.tyrosec.com/releases/<version>/SHA256SUMS`. A result of “identical” means the official binary is built
+from exactly this source.
 
-## Was dahinter steckt
+## How it works
 
-- **Gleiche Werkzeuge:** Basis-Abbild per Prüfsumme festgelegt, Zig per Prüfsumme geprüft, cargo-zigbuild mit fester
-  Version.
-- **Gleiche Abhängigkeiten:** `cargo … --locked` nutzt exakt die Versionen und Prüfsummen aus `Cargo.lock`.
-- **Keine Umgebungsspuren:** Pfade der Build-Umgebung werden beim Übersetzen ersetzt (`.cargo/config.toml`), die
-  Programmdatei enthält keine Zeitstempel.
-- **Signatur:** Die Prüfsummen jeder Version stehen außerdem im signierten Manifest
-  (`manifest.json`, Signaturen Ed25519 und P-256) im selben Ordner; der Agent installiert Updates nur mit gültigen
-  Signaturen (`crates/transport/src/update.rs`).
+- **Same tools:** base image pinned by digest, Zig verified by checksum, cargo-zigbuild with a fixed version.
+- **Same dependencies:** `cargo … --locked` uses exactly the versions and checksums from `Cargo.lock`.
+- **No traces of the build environment:** build paths are remapped during compilation (`.cargo/config.toml`); the
+  binary contains no timestamps.
+- **Signature:** the checksums of every version are also listed in the signed manifest (`manifest.json` with signature
+  `manifest.json.sig`, Ed25519) in the same folder; the agent installs updates only with a valid signature from one of
+  its built-in release keys (`crates/transport/src/update.rs`). `manifest.json.sig.p256` is an additional P-256
+  signature used by the installer on systems with an older openssl.
 
-## Auf dem Server nachsehen
+## Check on the server
 
 ```sh
 tyrosecd --version
 sha256sum /opt/tyrosecd/bin/tyrosecd
 ```
 
-Die Prüfsumme muss mit der Zeile `tyrosecd-x86_64` (bzw. `-aarch64`) in `SHA256SUMS` der Version übereinstimmen.
-
----
-
-**English:** every official tyrosecd binary can be rebuilt bit-for-bit from this source. Check out the tag matching
-`tyrosecd --version` and run `sh verify.sh <version> [x86_64|aarch64]`; it builds in the pinned environment from
-`build/Dockerfile` and compares the result with `https://get.tyrosec.com/releases/<version>/SHA256SUMS`. On the server,
-`sha256sum /opt/tyrosecd/bin/tyrosecd` must match the same line.
+The checksum must match the line `tyrosecd-x86_64` (or `-aarch64`) in the `SHA256SUMS` of that version.

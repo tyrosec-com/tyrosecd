@@ -1,10 +1,10 @@
-//! HTTPS-Client (rustls) mit optionalem Client-Zertifikat (mTLS).
+//! HTTPS client (rustls) with an optional client certificate (mTLS).
 //!
-//! Nur TLS 1.3 zur Zentrale (Enrollment, Versand, Heartbeat, Zertifikats-Erneuerung). Der Download der
-//! Selbst-Updates (`update.rs`) nutzt einen eigenen ureq-Agent und ist davon nicht betroffen.
+//! TLS 1.3 only towards the central server (enrollment, sending, heartbeat, certificate renewal). The download of
+//! self-updates (`update.rs`) uses its own ureq agent and is not affected by this.
 //!
-//! Nach einer Zertifikats-Erneuerung (`renew`) bauen alle Clients ihre TLS-Konfiguration beim nächsten
-//! Aufruf neu auf (Generationszähler) – ohne Neustart des Agents.
+//! After a certificate renewal (`renew`) all clients rebuild their TLS configuration on the next
+//! call (generation counter) – without restarting the agent.
 
 use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -15,10 +15,10 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use crate::config::AgentConfig;
 
-/// Erhöht sich bei jedem Austausch von Schlüssel/Zertifikat
+/// Incremented on every exchange of key/certificate
 static CERT_GEN: AtomicU64 = AtomicU64::new(0);
 
-/// Neues Client-Zertifikat liegt bereit: alle Clients laden es beim nächsten Aufruf.
+/// A new client certificate is ready: all clients load it on their next call.
 pub fn reload_all() {
     CERT_GEN.fetch_add(1, Ordering::SeqCst);
 }
@@ -37,10 +37,10 @@ fn load_certs(path: &str) -> Result<Vec<rustls::pki_types::CertificateDer<'stati
 
 fn load_key(path: &str) -> Result<rustls::pki_types::PrivateKeyDer<'static>> {
     let mut r = std::io::BufReader::new(std::fs::File::open(path).with_context(|| path.to_string())?);
-    rustls_pemfile::private_key(&mut r)?.ok_or_else(|| anyhow!("kein Schlüssel in {path}"))
+    rustls_pemfile::private_key(&mut r)?.ok_or_else(|| anyhow!("no key in {path}"))
 }
 
-/// TLS-Konfiguration zur Zentrale: nur TLS 1.3
+/// TLS configuration towards the central server: TLS 1.3 only
 pub fn tls_config(cfg: &AgentConfig, with_client_cert: bool) -> Result<rustls::ClientConfig> {
     let mut roots = rustls::RootCertStore::empty();
     let ca = cfg.server_ca_path();
@@ -74,22 +74,22 @@ fn build(cfg: &AgentConfig, with_client_cert: bool) -> Result<ureq::Agent> {
     Ok(ab.build())
 }
 
-/// Erreichbarkeit der Zentrale unter `server` prüfen – ohne Nebenwirkungen (kein Heartbeat, der eine
-/// angeforderte Prüfung oder Aktion „verbrauchen“ würde): GET auf einen nicht vorhandenen Pfad. Jede
-/// HTTP-Antwort zählt als Erfolg, denn TLS 1.3 mit Prüfung gegen die Server-CA und den Hostnamen stellt
-/// sicher, dass es unsere Zentrale ist. Nutzt Client-Zertifikat und Proxy wie der normale Versand.
+/// Check reachability of the central server at `server` – without side effects (no heartbeat that would
+/// "consume" a requested check or action): GET on a non-existent path. Any
+/// HTTP response counts as success, because TLS 1.3 with verification against the server CA and the host name ensures
+/// that it is our central server. Uses the client certificate and proxy like normal sending.
 pub fn probe(cfg: &AgentConfig, server: &str) -> Result<()> {
     let mut c = cfg.clone();
     c.server = server.to_string();
     let agent = build(&c, true)?;
     match agent.get(&format!("{}/v1/probe", server.trim_end_matches('/'))).timeout(Duration::from_secs(20)).call() {
         Ok(_) | Err(ureq::Error::Status(..)) => Ok(()),
-        Err(e) => Err(anyhow!("{server} nicht erreichbar: {e}")),
+        Err(e) => Err(anyhow!("{server} not reachable: {e}")),
     }
 }
 
 impl Client {
-    /// `with_client_cert = false` nur für das Enrollment.
+    /// `with_client_cert = false` only for enrollment.
     pub fn new(cfg: &AgentConfig, with_client_cert: bool) -> Result<Client> {
         if with_client_cert {
             crate::renew::recover_pending(cfg);
@@ -99,7 +99,7 @@ impl Client {
         Ok(Client { cfg: cfg.clone(), with_client_cert, agent: RwLock::new((generation, agent)), base: cfg.server.trim_end_matches('/').to_string() })
     }
 
-    /// aktueller ureq-Agent; nach einer Erneuerung einmal neu aufgebaut
+    /// current ureq agent; rebuilt once after a renewal
     fn agent(&self) -> ureq::Agent {
         let generation = CERT_GEN.load(Ordering::SeqCst);
         {
@@ -113,7 +113,7 @@ impl Client {
             match build(&self.cfg, self.with_client_cert) {
                 Ok(n) => *a = (generation, n),
                 Err(e) => {
-                    eprintln!("[tyrosecd] neues Client-Zertifikat nicht ladbar ({e:#}) – bisherige Verbindung bleibt");
+                    eprintln!("[tyrosecd] new client certificate cannot be loaded ({e:#}) – keeping the current connection");
                     a.0 = generation;
                 }
             }
@@ -121,7 +121,7 @@ impl Client {
         a.1.clone()
     }
 
-    /// POST mit Protobuf-Body; `zstd` = Body ist zstd-komprimiert.
+    /// POST with a protobuf body; `zstd` = body is zstd-compressed.
     pub fn post(&self, path: &str, body: &[u8], zstd: bool) -> Result<Vec<u8>> {
         let mut req = self.agent().post(&format!("{}{}", self.base, path)).set("Content-Type", "application/x-protobuf");
         if zstd {
@@ -130,11 +130,11 @@ impl Client {
         read_response(req.send_bytes(body))
     }
 
-    /// POST mit JSON-Body (Zertifikats-Erneuerung)
+    /// POST with a JSON body (certificate renewal)
     pub fn post_json(&self, path: &str, body: &serde_json::Value) -> Result<serde_json::Value> {
         let req = self.agent().post(&format!("{}{}", self.base, path)).set("Content-Type", "application/json");
         let v = read_response(req.send_bytes(&serde_json::to_vec(body)?))?;
-        serde_json::from_slice(&v).context("Antwort ist kein JSON")
+        serde_json::from_slice(&v).context("response is not JSON")
     }
 }
 
@@ -149,7 +149,7 @@ fn read_response(r: std::result::Result<ureq::Response, ureq::Error>) -> Result<
             let msg = resp.into_string().unwrap_or_default();
             bail!("HTTP {code}: {}", msg.chars().take(300).collect::<String>())
         }
-        Err(e) => Err(anyhow!("Verbindung: {e}")),
+        Err(e) => Err(anyhow!("connection: {e}")),
     }
 }
 
@@ -160,7 +160,7 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let cfg: crate::AgentConfig = toml::from_str(&format!("server = \"https://x\"\ndata_dir = {:?}", d.path().to_string_lossy())).unwrap();
         let c = super::tls_config(&cfg, false).unwrap();
-        // Aufbau mit nur TLS 1.3 gelingt (Versionsliste ist in rustls nicht öffentlich abfragbar)
+        // building with TLS 1.3 only succeeds (the version list cannot be queried publicly in rustls)
         let _ = c;
     }
 }

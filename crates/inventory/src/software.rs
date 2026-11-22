@@ -1,12 +1,12 @@
-//! Installierte Software für den Schwachstellen-Abgleich in der Zentrale
-//! (Hauptplan 28.3). Nur lesen, nichts ausführen:
-//! - Systempakete aus dpkg/rpm/apk – mit **Quellpaket**-Namen, denn OSV führt
-//!   Distributions-Advisories (Debian DSA/DLA, Ubuntu USN …) je Quellpaket
-//! - WordPress-Core, Plugins, Themes (Version aus den Headern)
-//! - Composer (`composer.lock`) und npm (`package-lock.json`) in den Webroots
+//! Installed software for vulnerability matching on the server
+//! (main plan 28.3). Read only, execute nothing:
+//! - System packages from dpkg/rpm/apk – with **source package** names, because OSV lists
+//!   distribution advisories (Debian DSA/DLA, Ubuntu USN …) per source package
+//! - WordPress core, plugins, themes (version from the headers)
+//! - Composer (`composer.lock`) and npm (`package-lock.json`) in the webroots
 //!
-//! Container-Wurzeln werden nur über `FsRoot::Contained` gelesen (openat2 mit `RESOLVE_IN_ROOT`, nur reguläre
-//! Dateien, Größengrenzen).
+//! Container roots are read only via `FsRoot::Contained` (openat2 with `RESOLVE_IN_ROOT`, regular
+//! files only, size limits).
 
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -16,20 +16,20 @@ use tyrosd_check::rootfs::{self, FsRoot, Kind};
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Package {
-    /// OSV-Ökosystem, z. B. „Debian:12“, „Ubuntu:24.04:LTS“, „AlmaLinux:9“, „Packagist“, „npm“, „WordPress“
+    /// OSV ecosystem, e.g. "Debian:12", "Ubuntu:24.04:LTS", "AlmaLinux:9", "Packagist", "npm", "WordPress"
     pub ecosystem: String,
     pub name: String,
     pub version: String,
     /// pkg | wp-core | wp-plugin | wp-theme | composer | npm
     pub source: String,
-    /// Fundort (Webroot bzw. Lockfile), leer bei Systempaketen
+    /// Location (webroot or lockfile), empty for system packages
     pub location: String,
 }
 
 #[derive(Serialize, Debug, Default)]
 pub struct Software {
     pub os_ecosystem: String,
-    /// `ID` und `VERSION_ID` aus os-release – für das Support-Ende in der Zentrale (unabhängig vom Ökosystem)
+    /// `ID` and `VERSION_ID` from os-release – for end of support on the server (independent of the ecosystem)
     pub os_id: String,
     pub os_version: String,
     pub packages: Vec<Package>,
@@ -39,40 +39,40 @@ fn os_release() -> (String, String) {
     os_release_in(&FsRoot::host("/"))
 }
 
-/// os-release unter einer anderen Wurzel (Test-Wurzeln; Container über `os_release_in`)
+/// os-release under a different root (test roots; containers via `os_release_in`)
 pub fn os_release_at(root: &str) -> (String, String) {
     os_release_in(&FsRoot::host(root))
 }
 
-/// os-release unter einer Wurzel
+/// os-release under a root
 pub fn os_release_in(fs: &FsRoot) -> (String, String) {
     let s = fs.read_string("/etc/os-release", rootfs::SMALL).or_else(|| fs.read_string("/usr/lib/os-release", rootfs::SMALL)).unwrap_or_default();
     let get = |k: &str| s.lines().find_map(|l| l.strip_prefix(&format!("{k}="))).map(|v| rootfs::cap_name(v.trim_matches('"'), 64)).unwrap_or_default();
     (get("ID"), get("VERSION_ID"))
 }
 
-/// OSV-Ökosystemname der Distribution.
+/// OSV ecosystem name of the distribution.
 pub fn os_ecosystem() -> String {
     ecosystem_of(os_release())
 }
 
-/// Ökosystem aus (ID, VERSION_ID)
+/// Ecosystem from (ID, VERSION_ID)
 pub fn ecosystem_of((id, ver): (String, String)) -> String {
     let major = ver.split('.').next().unwrap_or("").to_string();
     match id.as_str() {
         "debian" => format!("Debian:{major}"),
-        // OSV: Ubuntu-LTS als „Ubuntu:24.04:LTS“
+        // OSV: Ubuntu LTS as "Ubuntu:24.04:LTS"
         "ubuntu" => {
             let lts = ver.ends_with(".04") && major.parse::<u32>().map(|m| m % 2 == 0).unwrap_or(false);
             if lts { format!("Ubuntu:{ver}:LTS") } else { format!("Ubuntu:{ver}") }
         }
         "almalinux" => format!("AlmaLinux:{major}"),
         "rocky" => format!("Rocky Linux:{major}"),
-        // RHEL-Familie: binärkompatibel zu AlmaLinux (gleiche Quellpakete und Versionen) → AlmaLinux-Meldungen.
-        // OSV führt Red Hat nur je Repository und Binärpaket; CentOS 7 und älter haben keine Daten mehr.
+        // RHEL family: binary compatible with AlmaLinux (same source packages and versions) → AlmaLinux advisories.
+        // OSV lists Red Hat only per repository and binary package; CentOS 7 and older no longer have data.
         "rhel" | "centos" | "ol" | "cloudlinux" | "eurolinux" | "navylinux" | "virtuozzo" | "miraclelinux"
             if matches!(major.as_str(), "8" | "9" | "10") => format!("AlmaLinux:{major}"),
-        // openSUSE: OSV führt Meldungen je Quellpaket; SLES nutzt dieselben Pakete wie Leap gleicher Version
+        // openSUSE: OSV lists advisories per source package; SLES uses the same packages as Leap of the same version
         "opensuse-leap" | "sles" | "sled" | "sles_sap" if ver.contains('.') => format!("openSUSE:Leap {ver}"),
         "opensuse-tumbleweed" | "opensuse-slowroll" => "openSUSE:Tumbleweed".into(),
         "alpine" => {
@@ -83,7 +83,7 @@ pub fn ecosystem_of((id, ver): (String, String)) -> String {
     }
 }
 
-/// dpkg: installierte Pakete, gruppiert nach Quellpaket (Name, Version).
+/// dpkg: installed packages, grouped by source package (name, version).
 pub fn dpkg_packages(eco: &str) -> Vec<Package> {
     dpkg_packages_in(&FsRoot::host("/"), eco)
 }
@@ -113,7 +113,7 @@ pub fn parse_dpkg(s: &str, eco: &str) -> Vec<Package> {
         if !installed || name.is_empty() || version.is_empty() {
             continue;
         }
-        // „Source: openssl (3.0.13-1)“ → Quellname + ggf. abweichende Quellversion
+        // "Source: openssl (3.0.13-1)" → source name + possibly a different source version
         let (src_name, src_ver) = match source.split_once(' ') {
             Some((n, v)) => (n, v.trim_matches(|c| c == '(' || c == ')')),
             None if !source.is_empty() => (source, version),
@@ -124,12 +124,12 @@ pub fn parse_dpkg(s: &str, eco: &str) -> Vec<Package> {
     out.into_iter().collect()
 }
 
-/// rpm (Alma/Rocky): Quellpaket aus SOURCERPM.
+/// rpm (Alma/Rocky): source package from SOURCERPM.
 pub fn rpm_packages(eco: &str) -> Vec<Package> {
     rpm_query(&[], eco)
 }
 
-/// `rpm -qa` mit zusätzlichen Argumenten, Zeitlimit 120 s
+/// `rpm -qa` with additional arguments, time limit 120 s
 fn rpm_query(extra: &[&str], eco: &str) -> Vec<Package> {
     use std::io::Read;
     use std::process::{Command, Stdio};
@@ -143,7 +143,7 @@ fn rpm_query(extra: &[&str], eco: &str) -> Vec<Package> {
     else {
         return vec![];
     };
-    // Ausgabe in einem eigenen Faden lesen (sonst blockiert rpm bei vollem Puffer), Ende mit Zeitlimit abwarten
+    // read output in a separate thread (else rpm blocks on a full buffer), wait for the end with a time limit
     let Some(so) = child.stdout.take() else { return vec![] };
     let reader = std::thread::spawn(move || {
         let mut v = Vec::new();
@@ -166,7 +166,7 @@ fn rpm_query(extra: &[&str], eco: &str) -> Vec<Package> {
     parse_rpm_qa(&String::from_utf8_lossy(&out), eco)
 }
 
-/// Ausgabe von `rpm -qa --qf '%{SOURCERPM}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\n'`
+/// Output of `rpm -qa --qf '%{SOURCERPM}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\n'`
 pub fn parse_rpm_qa(s: &str, eco: &str) -> Vec<Package> {
     let mut out = BTreeSet::new();
     for l in s.lines() {
@@ -183,15 +183,15 @@ pub fn parse_rpm_qa(s: &str, eco: &str) -> Vec<Package> {
     out.into_iter().collect()
 }
 
-/// Ort der RPM-Datenbank unter einer Wurzel (Symlink /var/lib/rpm → ../../usr/lib/sysimage/rpm bleibt in der Wurzel)
+/// Location of the RPM database under a root (symlink /var/lib/rpm → ../../usr/lib/sysimage/rpm stays in the root)
 fn rpm_db_dir(fs: &FsRoot) -> Option<&'static str> {
     ["/var/lib/rpm", "/usr/lib/sysimage/rpm"].into_iter().find(|d| fs.is_dir(d))
 }
 
-/// RPM-Pakete unter einer Wurzel. Für Container kein `rpm --root <Container-Wurzel>`: rpm löst Pfade dort selbst auf
-/// (absolute Symlinks führten auf den Host, FIFOs/Geräte blockierten). Stattdessen werden die Dateien der Datenbank über
-/// `FsRoot` (openat2, nur reguläre Dateien, je ≤ 256 MiB, zusammen ≤ 512 MiB) in ein eigenes, nur für root lesbares
-/// Verzeichnis kopiert und dort mit `rpm --dbpath` abgefragt (Zeitlimit 120 s).
+/// RPM packages under a root. For containers no `rpm --root <container root>`: rpm resolves paths there by itself
+/// (absolute symlinks led to the host, FIFOs/devices blocked). Instead, the database files are copied via
+/// `FsRoot` (openat2, regular files only, each ≤ 256 MiB, total ≤ 512 MiB) into a separate directory readable only
+/// by root and queried there with `rpm --dbpath` (time limit 120 s).
 pub fn rpm_packages_in(fs: &FsRoot, eco: &str) -> Vec<Package> {
     if fs.is_host_root() {
         return rpm_packages(eco);
@@ -203,7 +203,7 @@ pub fn rpm_packages_in(fs: &FsRoot, eco: &str) -> Vec<Package> {
     let tmp = std::env::temp_dir().join(format!("tyrosecd-rpmdb-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0)));
     {
         use std::os::unix::fs::DirBuilderExt;
-        // neu anlegen (schlägt fehl, falls der Name schon existiert – auch als Symlink), nur für root
+        // create new (fails if the name already exists – also as a symlink), root only
         if std::fs::DirBuilder::new().mode(0o700).create(&tmp).is_err() {
             return vec![];
         }
@@ -230,7 +230,7 @@ pub fn rpm_packages_in(fs: &FsRoot, eco: &str) -> Vec<Package> {
     out
 }
 
-/// apk (Alpine): Herkunftspaket (o:) und Version (V:).
+/// apk (Alpine): origin package (o:) and version (V:).
 pub fn apk_packages(eco: &str) -> Vec<Package> {
     apk_packages_in(&FsRoot::host("/"), eco)
 }
@@ -258,12 +258,12 @@ fn theme_version_in(fs: &FsRoot, dir: &str) -> Option<String> {
     })
 }
 
-/// WordPress-Core, Plugins und Themes unter den Webroots.
+/// WordPress core, plugins and themes under the webroots.
 pub fn wordpress(webroots: &[String]) -> Vec<Package> {
     wordpress_in(&FsRoot::host(""), webroots)
 }
 
-/// Wie `wordpress`, unter einer Wurzel (Webroots und Fundorte relativ zu ihr)
+/// Like `wordpress`, under a root (webroots and locations relative to it)
 pub fn wordpress_in(fs: &FsRoot, webroots: &[String]) -> Vec<Package> {
     let mut out = Vec::new();
     for wp in tyrosd_check::wordpress::find_in(fs, webroots) {
@@ -285,12 +285,12 @@ pub fn wordpress_in(fs: &FsRoot, webroots: &[String]) -> Vec<Package> {
     out
 }
 
-/// composer.lock und package-lock.json (Tiefe ≤ 4, ohne vendor/node_modules).
+/// composer.lock and package-lock.json (depth ≤ 4, without vendor/node_modules).
 pub fn lockfiles(webroots: &[String]) -> Vec<Package> {
     lockfiles_in(&FsRoot::host(""), webroots)
 }
 
-/// Wie `lockfiles`, unter einer Wurzel (Webroots und Fundorte relativ zu ihr)
+/// Like `lockfiles`, under a root (webroots and locations relative to it)
 pub fn lockfiles_in(fs: &FsRoot, webroots: &[String]) -> Vec<Package> {
     let mut out = Vec::new();
     for w in webroots {
@@ -330,12 +330,12 @@ pub fn lockfiles_in(fs: &FsRoot, webroots: &[String]) -> Vec<Package> {
     out
 }
 
-/// Pakete unter einer Wurzel (Host oder Test-Wurzel), passend zur Paketverwaltung
+/// Packages under a root (host or test root), matching the package manager
 pub fn packages_at(root: &str, eco: &str) -> Vec<Package> {
     packages_in(&FsRoot::host(root), eco)
 }
 
-/// Pakete unter einer Wurzel; Container als `FsRoot::Contained`
+/// Packages under a root; containers as `FsRoot::Contained`
 pub fn packages_in(fs: &FsRoot, eco: &str) -> Vec<Package> {
     if fs.exists("/var/lib/dpkg/status") {
         dpkg_packages_in(fs, eco)
@@ -400,11 +400,11 @@ Version: 1
         assert_eq!(names, vec!["bash 5.1.8-9.el9", "openssl 1:3.0.7-27.el9"]);
     }
 
-    /// Container-Wurzel: Symlinks auf Host-Dateien und Geräte werden nicht gelesen, Inhalte innerhalb schon
+    /// Container root: symlinks to host files and devices are not read, contents inside it are
     #[test]
     fn container_root_reads_stay_inside() {
         if !FsRoot::openat2_supported() {
-            eprintln!("openat2 nicht verfügbar – Test übersprungen");
+            eprintln!("openat2 not available – test skipped");
             return;
         }
         use std::os::unix::fs::symlink;
@@ -418,7 +418,7 @@ Version: 1
         std::fs::create_dir_all(ct.join("var/www/app")).unwrap();
         std::fs::write(ct.join("usr/lib/os-release"), "ID=debian\nVERSION_ID=\"12\"\n").unwrap();
         symlink("/usr/lib/os-release", ct.join("etc/os-release")).unwrap();
-        // dpkg status → Gerät (früher: Speicher voll); WordPress-Version → Host-Datei
+        // dpkg status → device (formerly: memory exhausted); WordPress version → host file
         symlink("/dev/zero", ct.join("var/lib/dpkg/status")).unwrap();
         let host_secret = d.path().join("host-version.php");
         std::fs::write(&host_secret, "<?php $wp_version = '9.9.9-HOST';").unwrap();
@@ -430,8 +430,8 @@ Version: 1
         assert!(packages_in(&fs, "Debian:12").is_empty());
         let webroots = tyrosd_check::default_webroots_in(&fs);
         assert_eq!(webroots, vec!["/var/www".to_string()]);
-        assert!(wordpress_in(&fs, &webroots).is_empty(), "Host-Datei als WordPress-Version");
-        // echte Version im Container wird gefunden, Fundorte relativ zur Wurzel
+        assert!(wordpress_in(&fs, &webroots).is_empty(), "host file as WordPress version");
+        // the real version in the container is found, locations relative to the root
         std::fs::remove_file(ct.join("var/www/html/wp-includes/version.php")).unwrap();
         std::fs::write(ct.join("var/www/html/wp-includes/version.php"), "<?php $wp_version = '6.7.1';").unwrap();
         let wp = wordpress_in(&fs, &webroots);
@@ -446,7 +446,7 @@ Version: 1
         let e = |id: &str, v: &str| ecosystem_of((id.into(), v.into()));
         assert_eq!(e("rhel", "9.4"), "AlmaLinux:9");
         assert_eq!(e("centos", "9"), "AlmaLinux:9"); // CentOS Stream 9
-        assert_eq!(e("centos", "7"), ""); // ohne Daten → nur Support-Ende
+        assert_eq!(e("centos", "7"), ""); // no data → only end of support
         assert_eq!(e("ol", "8.10"), "AlmaLinux:8");
         assert_eq!(e("cloudlinux", "9.5"), "AlmaLinux:9");
         assert_eq!(e("opensuse-leap", "15.6"), "openSUSE:Leap 15.6");
@@ -459,7 +459,7 @@ Version: 1
 
     #[test]
     fn ecosystem_names() {
-        // nur Format prüfen (läuft im Build-Container: Debian)
+        // only check the format (runs in the build container: Debian)
         let e = os_ecosystem();
         assert!(e.is_empty() || e.contains(':'), "{e}");
     }

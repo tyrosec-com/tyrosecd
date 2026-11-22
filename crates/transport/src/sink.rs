@@ -1,4 +1,4 @@
-//! Ereignisse → Protokoll → Spool.
+//! Events → protocol → spool.
 
 use std::sync::Arc;
 
@@ -69,13 +69,13 @@ impl Sink for SpoolSink {
         let mut fe = to_pb(e, true);
         let payload = fe.patch_zstd.len() + fe.content_zstd.len();
         if payload > 0 && !self.spool.has_room(payload + 512) {
-            // Spool voll: Inhalt/Diff weglassen, Metadaten + Hashes behalten (Hauptplan 9)
+            // spool full: omit content/diff, keep metadata + hashes (main plan 9)
             fe.patch_zstd.clear();
             fe.content_zstd.clear();
             fe.note = if fe.note.is_empty() { "spool_full".into() } else { format!("{},spool_full", fe.note) };
         }
         if let Err(err) = self.spool.push(e.ts_ns, pb::envelope::Body::File(fe)) {
-            eprintln!("[tyrosecd] Spool-Fehler: {err:#}");
+            eprintln!("[tyrosecd] spool error: {err:#}");
         }
     }
 }

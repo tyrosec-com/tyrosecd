@@ -1,9 +1,9 @@
-//! Probelauf „Schutz in Echtzeit“ (18.11.2026): Programmstarts aus Orten, an denen ein scharfer Schutz sie verhindern
-//! würde (/tmp, /var/tmp, /dev/shm, Upload-Ordner von Websites). Es wird **nichts verhindert** – nur gemeldet, damit wir
-//! sehen, was dort im Alltag legitim startet, bevor jemals etwas blockiert wird.
+//! Trial run "real-time protection" (2026-11-18): program starts from places where an enforcing protection would
+//! prevent them (/tmp, /var/tmp, /dev/shm, website upload directories). **Nothing is prevented** – only reported, so we
+//! see what legitimately starts there in everyday use before anything is ever blocked.
 //!
-//! Eigene fanotify-Gruppe nur mit `FAN_OPEN_EXEC` (reine Benachrichtigung, keine Berechtigungsabfrage): Ein Hänger oder
-//! Überlauf hier berührt weder den Datei-Wächter noch startende Programme. Überläufe werden nur gezählt.
+//! Separate fanotify group with only `FAN_OPEN_EXEC` (plain notification, no permission request): a hang or
+//! overflow here affects neither the file watcher nor starting programs. Overflows are only counted.
 
 use std::collections::HashMap;
 use std::ffi::CString;
@@ -19,26 +19,26 @@ use tyrosd_core::{Backend, Op, RawEvent};
 use super::*;
 
 const FAN_OPEN_EXEC: u64 = 0x0000_1000;
-/// Dieselbe Datei höchstens alle 10 Minuten melden
+/// Report the same file at most every 10 minutes
 const REPEAT: Duration = Duration::from_secs(600);
 
-/// Verzeichnisse, deren Dateisysteme markiert werden
+/// Directories whose file systems are marked
 const DIRS: &[&str] = &["/tmp", "/var/tmp", "/dev/shm", "/var/www", "/srv", "/home"];
 
-/// Würde ein scharfer Schutz den Start dieser Datei verhindern? → Ort (für die Anzeige)
+/// Would an enforcing protection prevent the start of this file? → location (for display)
 pub fn exec_place(path: &str) -> Option<&'static str> {
     const TMP: &[(&str, &str)] = &[("/tmp/", "/tmp"), ("/var/tmp/", "/var/tmp"), ("/dev/shm/", "/dev/shm")];
     if let Some((_, l)) = TMP.iter().find(|(d, _)| path.starts_with(d)) {
         return Some(l);
     }
     const UPLOADS: &[(&str, &str)] = &[
-        ("/wp-content/uploads/", "Upload-Ordner (WordPress)"),
-        ("/pub/media/", "Upload-Ordner (Magento)"),
-        ("/public/media/", "Upload-Ordner (Shopware)"),
-        ("/storage/app/public/", "Upload-Ordner (Laravel)"),
-        ("/sites/default/files/", "Upload-Ordner (Drupal)"),
-        ("/fileadmin/", "Upload-Ordner (TYPO3)"),
-        ("/uploads/", "Upload-Ordner"),
+        ("/wp-content/uploads/", "upload folder (WordPress)"),
+        ("/pub/media/", "upload folder (Magento)"),
+        ("/public/media/", "upload folder (Shopware)"),
+        ("/storage/app/public/", "upload folder (Laravel)"),
+        ("/sites/default/files/", "upload folder (Drupal)"),
+        ("/fileadmin/", "upload folder (TYPO3)"),
+        ("/uploads/", "upload folder"),
     ];
     UPLOADS.iter().find(|(d, _)| path.contains(d)).map(|(_, l)| *l)
 }
@@ -49,7 +49,7 @@ pub struct ExecWatch {
     cache: PathCache,
     seen: HashMap<String, Instant>,
     self_pid: i32,
-    /// markierte Dateisysteme (Einhängepunkte)
+    /// marked file systems (mount points)
     pub marked: Vec<String>,
     pub overflows: u64,
 }
@@ -75,7 +75,7 @@ impl ExecWatch {
             if w.mount_fds.contains_key(&fsid) {
                 continue;
             }
-            // Einhängepunkt des Verzeichnisses (längster passender Präfix)
+            // mount point of the directory (longest matching prefix)
             let Some(m) = mounts
                 .iter()
                 .filter(|m| FS_TYPES.contains(&m.fstype.as_str()))
@@ -88,19 +88,19 @@ impl ExecWatch {
                 continue;
             }
             if fanotify_mark(w.fd.as_raw_fd(), FAN_MARK_ADD | FAN_MARK_FILESYSTEM, FAN_OPEN_EXEC, &m.mount_point).is_err() {
-                continue; // z. B. Kernel ohne FAN_OPEN_EXEC (< 5.0) oder tmpfs ohne Datei-Handles (< 5.13)
+                continue; // e.g. kernel without FAN_OPEN_EXEC (< 5.0) or tmpfs without file handles (< 5.13)
             }
             let c = CString::new(m.mount_point.clone()).unwrap();
-            // SAFETY: gültiger Pfad
+            // SAFETY: valid path
             let mfd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC) };
             if mfd >= 0 {
-                // SAFETY: frischer fd
+                // SAFETY: fresh fd
                 w.mount_fds.insert(fsid, unsafe { OwnedFd::from_raw_fd(mfd) });
                 w.marked.push(m.mount_point.clone());
             }
         }
         if w.marked.is_empty() {
-            bail!("kein Dateisystem für Programmstarts markierbar");
+            bail!("no file system could be marked for program starts");
         }
         Ok(w)
     }
@@ -112,29 +112,29 @@ impl ExecWatch {
         }
         let mfd = self.mount_fds.get(&fsid)?.as_raw_fd();
         let mut buf = vec![0u32; handle.len().div_ceil(4) + 1];
-        // SAFETY: buf ist groß genug für handle.len() Bytes
+        // SAFETY: buf is large enough for handle.len() bytes
         unsafe { std::ptr::copy_nonoverlapping(handle.as_ptr(), buf.as_mut_ptr() as *mut u8, handle.len()) };
-        // SAFETY: buf enthält ein gültiges struct file_handle
+        // SAFETY: buf contains a valid struct file_handle
         let fd = unsafe {
             libc::syscall(libc::SYS_open_by_handle_at, mfd as libc::c_long, buf.as_ptr(), (libc::O_PATH | libc::O_CLOEXEC) as libc::c_long)
         };
         if fd < 0 {
             return None;
         }
-        // SAFETY: frischer fd
+        // SAFETY: fresh fd
         let owned = unsafe { OwnedFd::from_raw_fd(fd as i32) };
         let p = std::fs::read_link(format!("/proc/self/fd/{}", owned.as_raw_fd())).ok()?.to_string_lossy().into_owned();
-        // außerhalb unseres Mount-Namespaces (Container) → leer, wie im Datei-Wächter
+        // outside our mount namespace (container) → empty, as in the file watcher
         let p = if !p.ends_with(" (deleted)") && !same_object(owned.as_raw_fd(), &p) { String::new() } else { p };
         self.cache.insert(key, &p);
         Some(p)
     }
 
-    /// Ereignisschleife (blockiert)
+    /// Event loop (blocking)
     pub fn run(mut self, deb: Arc<Debouncer>) -> Result<()> {
         let mut buf = vec![0u8; 64 * 1024];
         loop {
-            // SAFETY: buf ist gültig
+            // SAFETY: buf is valid
             let n = unsafe { libc::read(self.fd.as_raw_fd(), buf.as_mut_ptr() as *mut libc::c_void, buf.len()) };
             if n < 0 {
                 let e = std::io::Error::last_os_error();
@@ -157,7 +157,7 @@ impl ExecWatch {
                     break;
                 }
                 if efd >= 0 {
-                    // SAFETY: fd vom Kernel, wir schließen ihn
+                    // SAFETY: fd from the kernel, we close it
                     unsafe { libc::close(efd) };
                 }
                 off += event_len;
@@ -225,7 +225,7 @@ mod tests {
     fn places() {
         assert_eq!(exec_place("/tmp/.x/kworker"), Some("/tmp"));
         assert_eq!(exec_place("/dev/shm/a"), Some("/dev/shm"));
-        assert_eq!(exec_place("/var/www/site/wp-content/uploads/2026/11/x"), Some("Upload-Ordner (WordPress)"));
+        assert_eq!(exec_place("/var/www/site/wp-content/uploads/2026/11/x"), Some("upload folder (WordPress)"));
         assert_eq!(exec_place("/usr/bin/php"), None);
         assert_eq!(exec_place("/var/www/site/vendor/bin/phpunit"), None);
         assert_eq!(exec_place("/tmpfoo/x"), None);

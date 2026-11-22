@@ -1,4 +1,4 @@
-//! TCP-Verbindungen aus /proc/net/tcp{,6} und ihre Prozesse (nur lesen).
+//! TCP connections from /proc/net/tcp{,6} and their processes (read only).
 
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -25,7 +25,7 @@ impl Conn {
     }
 }
 
-/// Hex-Adresse aus /proc/net/tcp (Netzwerk-Bytefolge je 32-Bit-Wort, little endian gespeichert)
+/// Hex address from /proc/net/tcp (network byte order per 32-bit word, stored little endian)
 pub fn parse_addr(hex: &str) -> Option<(IpAddr, u16)> {
     let (a, p) = hex.split_once(':')?;
     let port = u16::from_str_radix(p, 16).ok()?;
@@ -44,23 +44,23 @@ pub fn parse_addr(hex: &str) -> Option<(IpAddr, u16)> {
     Some((ip, port))
 }
 
-/// Bestehende TCP-Verbindungen (Zustand 01 = ESTABLISHED)
+/// Established TCP connections (state 01 = ESTABLISHED)
 pub fn established() -> Vec<Conn> {
     with_states(&["01"])
 }
 
-/// Lokale Ports, auf denen der Server lauscht (Zustand 0A = LISTEN)
+/// Local ports on which the server listens (state 0A = LISTEN)
 pub fn listening_ports() -> HashSet<u16> {
     with_states(&["0A"]).into_iter().map(|c| c.lport).collect()
 }
 
-/// Eingehende Verbindung: der lokale Port ist ein Port, auf dem der Server lauscht
-/// (dann ist der entfernte Port nur der zufällige Absender-Port des Clients)
+/// Incoming connection: the local port is a port on which the server listens
+/// (then the remote port is just the client's random source port)
 pub fn is_inbound(c: &Conn, listening: &HashSet<u16>) -> bool {
     listening.contains(&c.lport)
 }
 
-/// Verbindungen in den angegebenen Zuständen (01 ESTABLISHED, 08 CLOSE_WAIT …)
+/// Connections in the given states (01 ESTABLISHED, 08 CLOSE_WAIT …)
 pub fn with_states(states: &[&str]) -> Vec<Conn> {
     let mut out = Vec::new();
     for f in ["/proc/net/tcp", "/proc/net/tcp6"] {
@@ -77,7 +77,7 @@ pub fn with_states(states: &[&str]) -> Vec<Conn> {
     out
 }
 
-/// Socket-Inode → PID (über /proc/*/fd)
+/// Socket inode → PID (via /proc/*/fd)
 pub fn socket_owners() -> HashMap<u64, u32> {
     let mut m = HashMap::new();
     let Ok(rd) = std::fs::read_dir("/proc") else { return m };
@@ -99,14 +99,14 @@ fn socket_inode(p: &std::path::Path) -> Option<u64> {
     s.strip_prefix("socket:[")?.strip_suffix(']')?.parse().ok()
 }
 
-/// Ist stdin oder stdout des Prozesses eine TCP-Verbindung nach außen? → Gegenstelle
+/// Is stdin or stdout of the process an outgoing TCP connection? → peer
 pub fn stdio_remote(pid: u32) -> Option<String> {
     let ino0 = socket_inode(std::path::Path::new(&format!("/proc/{pid}/fd/0")));
     let ino1 = socket_inode(std::path::Path::new(&format!("/proc/{pid}/fd/1")));
     if ino0.is_none() && ino1.is_none() {
         return None;
     }
-    // auch CLOSE_WAIT: Gegenstelle hat geschlossen, die Shell hängt aber noch am Socket
+    // also CLOSE_WAIT: the peer has closed, but the shell is still attached to the socket
     with_states(&["01", "08"])
         .into_iter()
         .find(|c| (Some(c.inode) == ino0 || Some(c.inode) == ino1) && !c.remote_is_local())
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn parses_proc_net_addresses() {
-        // 127.0.0.1:22 bzw. 1.2.3.4:443
+        // 127.0.0.1:22 or 1.2.3.4:443
         assert_eq!(parse_addr("0100007F:0016").unwrap(), (IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 22));
         assert_eq!(parse_addr("04030201:01BB").unwrap(), (IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 443));
         // ::1
@@ -134,7 +134,7 @@ mod inbound_tests {
 
     #[test]
     fn inbound_ssh_is_not_outbound_to_pool_port() {
-        // Praxisfall: SSH-Client mit Absender-Port 45560 galt als „Mining-Pool“
+        // Real case: SSH client with source port 45560 was treated as a "mining pool"
         let listening: HashSet<u16> = [22, 80, 443].into();
         let ssh_in = Conn { raddr: "91.92.94.5".parse().unwrap(), rport: 45560, lport: 22, inode: 1 };
         let pool_out = Conn { raddr: "198.51.100.7".parse().unwrap(), rport: 45560, lport: 51234, inode: 2 };

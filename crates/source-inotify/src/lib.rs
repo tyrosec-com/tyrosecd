@@ -1,6 +1,6 @@
-//! inotify-Backend (Fallback für Kernel < 5.9 bzw. ohne fanotify-FID).
-//! Ein Watch pro Verzeichnis, Nach-Scan neuer Verzeichnisse (Rennen beim
-//! Anlegen), Overflow → Rückruf für gezielten Rescan. Keine Prozess-Zuordnung.
+//! inotify backend (fallback for kernel < 5.9 or without fanotify FID).
+//! One watch per directory, re-scan of new directories (race on
+//! creation), overflow → callback for a targeted rescan. No process attribution.
 
 use std::collections::HashMap;
 use std::ffi::OsStr;
@@ -17,14 +17,14 @@ pub struct Stats {
     pub limit_before: u64,
     pub limit_after: u64,
     pub add_errors: usize,
-    /// Verzeichnisse ohne Watch (Obergrenze erreicht → nur Scan)
+    /// Directories without a watch (limit reached → scan only)
     pub capped: usize,
 }
 
-/// Obergrenze der Watches (je Watch ca. 1 KB Kernel-Speicher, nicht auslagerbar).
+/// Upper limit of watches (about 1 KB of non-swappable kernel memory per watch).
 pub const MAX_WATCHES: usize = 131_072;
 
-/// Sicherheitskritische Verzeichnisse zuerst überwachen, falls die Obergrenze greift.
+/// Watch security-critical directories first, in case the limit applies.
 fn priority(p: &str) -> u8 {
     const CRIT: &[&str] = &["/etc", "/root", "/var/spool/cron", "/usr/bin", "/usr/sbin", "/bin", "/sbin", "/usr/local", "/lib/systemd", "/usr/lib/systemd", "/tmp", "/var/tmp", "/dev/shm", "/boot"];
     if CRIT.iter().any(|c| p == *c || p.starts_with(&format!("{c}/"))) || p.contains("/.ssh") {
@@ -54,7 +54,7 @@ fn read_limit() -> u64 {
         .unwrap_or(0)
 }
 
-/// Verzeichnisse unter den Wurzeln zählen (für Limit-Anpassung).
+/// Count directories under the roots (for adjusting the limit).
 fn dirs(roots: &[String], policy: &Policy, one_fs: bool) -> Vec<String> {
     let mut v = Vec::new();
     for r in roots {
@@ -78,9 +78,9 @@ fn ignored_dir(policy: &Policy, p: &str) -> bool {
     policy.mode_for(&format!("{}/.x", p.trim_end_matches('/'))) == ContentMode::Ignore || nextcloud_data_root(p)
 }
 
-/// Datenordner einer Nextcloud (Markierung `.ocdata`): Nutzerdateien, kein Code, nicht direkt ausgeliefert – keine
-/// Echtzeit-Watches (Praxisfall bei einer Installation: 73 000 Ordner, mehr als das Watch-Limit). Webroot und Apps der
-/// Nextcloud bleiben überwacht; der Abgleich-Scan sieht den Ordner weiter.
+/// Data folder of a Nextcloud (marker `.ocdata`): user files, no code, not served directly – no
+/// real-time watches (real-world case on one installation: 73,000 folders, more than the watch limit). Webroot and
+/// apps of the Nextcloud remain monitored; the reconciliation scan still sees the folder.
 fn nextcloud_data_root(p: &str) -> bool {
     std::path::Path::new(p).join(".ocdata").is_file()
 }
@@ -101,7 +101,7 @@ impl InotifySource {
         let mut after = before;
         let need = (list.len().min(MAX_WATCHES) as u64) * 12 / 10 + 8192;
         if need > before {
-            // Limit anheben (braucht root); dokumentiert und rückbaubar
+            // Raise the limit (requires root); documented and reversible
             if std::fs::write("/proc/sys/fs/inotify/max_user_watches", need.to_string()).is_ok() {
                 after = need;
             }
@@ -133,8 +133,8 @@ impl InotifySource {
         }
     }
 
-    /// Neues Verzeichnis: Watches rekursiv setzen und vorhandene Dateien
-    /// melden (sie können vor dem Watch entstanden sein).
+    /// New directory: set watches recursively and report existing files
+    /// (they may have been created before the watch).
     fn add_tree(&mut self, dir: &str, deb: &Debouncer) {
         let mut it = walkdir::WalkDir::new(dir).follow_links(false).into_iter();
         while let Some(Ok(e)) = it.next() {
@@ -151,8 +151,8 @@ impl InotifySource {
         }
     }
 
-    /// Ereignisschleife (blockiert). `on_overflow` wird bei Queue-Überlauf
-    /// aufgerufen (Rescan anstoßen).
+    /// Event loop (blocking). `on_overflow` is called on queue overflow
+    /// (triggers a rescan).
     pub fn run(mut self, deb: Arc<Debouncer>, on_overflow: impl Fn()) -> Result<()> {
         let mut buf = vec![0u8; 256 * 1024];
         let mut cookies: HashMap<u32, String> = HashMap::new();

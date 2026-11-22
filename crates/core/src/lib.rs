@@ -1,7 +1,7 @@
-//! Kern des Agents: Ereignismodell, Hashes, Diff/Patch, Snapshot-Cache,
-//! Redaction, Policy (inkl. fester lokaler Sperrliste) und Verarbeitung.
+//! Core of the agent: event model, hashes, diff/patch, snapshot cache,
+//! redaction, policy (incl. fixed local blocklist) and processing.
 //!
-//! Spike-Stand: bewusst einfach, aber schon in der späteren Crate-Struktur.
+//! Spike state: deliberately simple, but already in the later crate structure.
 
 pub mod state;
 pub mod trust;
@@ -25,7 +25,7 @@ pub use event::{Backend, Event, Op, RawEvent};
 pub use policy::{ContentMode, Policy};
 pub use processor::Processor;
 
-/// Aktuelle Zeit in Nanosekunden seit Epoch.
+/// Current time in nanoseconds since the epoch.
 pub fn now_ns() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()

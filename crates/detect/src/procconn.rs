@@ -1,5 +1,5 @@
-//! Proc-Connector (netlink, NETLINK_CONNECTOR / CN_IDX_PROC): meldet jeden Prozessstart.
-//! Braucht CAP_NET_ADMIN (in der systemd-Unit vorhanden). Kein eBPF, keine Kernel-Module.
+//! Proc connector (netlink, NETLINK_CONNECTOR / CN_IDX_PROC): reports every process start.
+//! Requires CAP_NET_ADMIN (present in the systemd unit). No eBPF, no kernel modules.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -10,9 +10,9 @@ const PROC_CN_MCAST_LISTEN: u32 = 1;
 const PROC_EVENT_EXEC: u32 = 0x0000_0002;
 const NLMSG_DONE: u16 = 3;
 
-/// Lauscht auf Prozessstarts und ruft `on_exec(pid)` auf, bis `stop` gesetzt ist.
+/// Listens for process starts and calls `on_exec(pid)` until `stop` is set.
 pub fn listen(stop: &AtomicBool, mut on_exec: impl FnMut(u32)) -> std::io::Result<()> {
-    // SAFETY: einfache Systemaufrufe mit geprüften Rückgabewerten
+    // SAFETY: simple system calls with checked return values
     unsafe {
         let fd = libc::socket(libc::AF_NETLINK, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, NETLINK_CONNECTOR);
         if fd < 0 {
@@ -21,12 +21,12 @@ pub fn listen(stop: &AtomicBool, mut on_exec: impl FnMut(u32)) -> std::io::Resul
         let guard = Fd(fd);
         let mut sa: libc::sockaddr_nl = std::mem::zeroed();
         sa.nl_family = libc::AF_NETLINK as u16;
-        sa.nl_pid = 0; // Kernel vergibt
+        sa.nl_pid = 0; // assigned by the kernel
         sa.nl_groups = CN_IDX_PROC;
         if libc::bind(fd, &sa as *const _ as *const libc::sockaddr, std::mem::size_of::<libc::sockaddr_nl>() as u32) < 0 {
             return Err(std::io::Error::last_os_error());
         }
-        // Anmeldung: nlmsghdr (16) + cn_msg (20) + op (4)
+        // subscription: nlmsghdr (16) + cn_msg (20) + op (4)
         let mut msg = [0u8; 40];
         msg[0..4].copy_from_slice(&40u32.to_ne_bytes());
         msg[4..6].copy_from_slice(&NLMSG_DONE.to_ne_bytes());
@@ -38,7 +38,7 @@ pub fn listen(stop: &AtomicBool, mut on_exec: impl FnMut(u32)) -> std::io::Resul
         if libc::send(fd, msg.as_ptr() as *const _, msg.len(), 0) < 0 {
             return Err(std::io::Error::last_os_error());
         }
-        // Empfangs-Timeout, damit `stop` geprüft wird
+        // receive timeout so that `stop` is checked
         let tv = libc::timeval { tv_sec: 1, tv_usec: 0 };
         libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVTIMEO, &tv as *const _ as *const _, std::mem::size_of::<libc::timeval>() as u32);
         let mut buf = vec![0u8; 8192];
@@ -48,7 +48,7 @@ pub fn listen(stop: &AtomicBool, mut on_exec: impl FnMut(u32)) -> std::io::Resul
                 let e = std::io::Error::last_os_error();
                 match e.raw_os_error() {
                     Some(libc::EAGAIN) | Some(libc::EINTR) => continue,
-                    Some(libc::ENOBUFS) => continue, // zu viele Starts auf einmal: einzelne gehen verloren
+                    Some(libc::ENOBUFS) => continue, // too many starts at once: some are lost
                     _ => return Err(e),
                 }
             }
@@ -59,7 +59,7 @@ pub fn listen(stop: &AtomicBool, mut on_exec: impl FnMut(u32)) -> std::io::Resul
     Ok(())
 }
 
-/// Eine oder mehrere netlink-Nachrichten auswerten (Layout: nlmsghdr | cn_msg | proc_event).
+/// Evaluate one or more netlink messages (layout: nlmsghdr | cn_msg | proc_event).
 pub fn parse(mut b: &[u8], on_exec: &mut impl FnMut(u32)) {
     while b.len() >= 16 {
         let len = u32::from_ne_bytes(b[0..4].try_into().unwrap()) as usize;
@@ -67,7 +67,7 @@ pub fn parse(mut b: &[u8], on_exec: &mut impl FnMut(u32)) {
             return;
         }
         let m = &b[..len];
-        // proc_event beginnt nach 16 + 20 Bytes; what @0, cpu @4, timestamp @8, event_data @16
+        // proc_event starts after 16 + 20 bytes; what @0, cpu @4, timestamp @8, event_data @16
         if m.len() >= 36 + 24 {
             let what = u32::from_ne_bytes(m[36..40].try_into().unwrap());
             if what == PROC_EVENT_EXEC {
@@ -88,7 +88,7 @@ pub fn parse(mut b: &[u8], on_exec: &mut impl FnMut(u32)) {
 struct Fd(i32);
 impl Drop for Fd {
     fn drop(&mut self) {
-        // SAFETY: eigener fd
+        // SAFETY: own fd
         unsafe { libc::close(self.0) };
     }
 }

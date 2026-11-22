@@ -1,6 +1,6 @@
-//! Vorgeschichte über ctime (aus dem Userspace kaum fälschbar): Änderungen
-//! pro Tag in den letzten N Tagen, Häufungen, jüngste Änderungen an
-//! sensiblen Orten, Hinweise auf Timestomping (mtime ≪ ctime).
+//! History via ctime (hard to forge from userspace): changes
+//! per day over the last N days, clusters, recent changes in
+//! sensitive locations, signs of timestomping (mtime ≪ ctime).
 
 use std::os::unix::fs::MetadataExt;
 
@@ -10,14 +10,14 @@ use crate::{Category, Ctx, Severity};
 
 #[derive(Serialize, Debug, Default)]
 pub struct Timeline {
-    /// (Tag als YYYY-MM-DD, Anzahl Dateien mit ctime an diesem Tag)
+    /// (day as YYYY-MM-DD, number of files with ctime on that day)
     pub days: Vec<(String, u64)>,
     pub peaks: Vec<(String, u64)>,
     pub recent_sensitive: Vec<(String, String)>,
 }
 
 fn ymd(secs: i64) -> String {
-    // Tage seit Epoch → Datum (proleptischer Gregorianischer Kalender)
+    // days since epoch → date (proleptic Gregorian calendar)
     let z = secs.div_euclid(86_400) + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -65,11 +65,11 @@ pub fn check(ctx: &mut Ctx) {
             if SENSITIVE.iter().any(|s| rel.starts_with(s)) || rel.contains("/.ssh/") {
                 recent.push((ct, p.clone()));
             }
-            // mtime liegt > 180 Tage vor ctime, ctime in den letzten 30 Tagen, PHP
+            // mtime is > 180 days before ctime, ctime within the last 30 days, PHP
             if p.ends_with(".php") && ct > now - 30 * 86_400 && m.mtime() < ct - 180 * 86_400 {
                 stomp += 1;
                 if stomp <= 30 {
-                    ctx.add(Severity::Low, Category::History, "mtime_older_than_ctime", "PHP-Datei kürzlich geändert, Zeitstempel aber alt (Deploy mit rsync -a oder Timestomping)", Some(p), Some(format!("mtime {} · ctime {}", ymd(m.mtime()), ymd(ct))));
+                    ctx.add(Severity::Low, Category::History, "mtime_older_than_ctime", "PHP file recently changed but timestamp is old (deploy with rsync -a or timestomping)", Some(p), Some(format!("mtime {} · ctime {}", ymd(m.mtime()), ymd(ct))));
                 }
             }
         }
@@ -81,7 +81,7 @@ pub fn check(ctx: &mut Ctx) {
     let threshold = (median * 5).max(50);
     let peaks: Vec<(String, u64)> = per_day.iter().filter(|(_, c)| **c >= threshold).map(|(d, c)| (d.clone(), *c)).collect();
     for (d, c) in &peaks {
-        ctx.add(Severity::Info, Category::History, "ctime_peak", format!("Häufung von Änderungen am {d}: {c} Dateien"), None, Some("Mit Updates/Deploys an diesem Tag abgleichen".into()));
+        ctx.add(Severity::Info, Category::History, "ctime_peak", format!("Cluster of changes on {d}: {c} files"), None, Some("Compare with updates/deploys on that day".into()));
     }
     recent.sort_by(|a, b| b.0.cmp(&a.0));
     let recent_sensitive: Vec<(String, String)> = recent.into_iter().take(40).map(|(t, p)| (ymd(t), p)).collect();

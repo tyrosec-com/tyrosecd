@@ -1,14 +1,15 @@
-//! Gehört eine geänderte Systemdatei unverändert zu einem installierten Paket?
+//! Does a changed system file belong, unmodified, to an installed package?
 //!
-//! Praxisfall: `unattended-upgrades` aktualisierte das Paket `sos`, eine neue Datei davon fand erst
-//! der periodische Scan 10 Minuten später – nach dem Paket-Update-Fenster – und es gab den kritischen Fehlalarm
-//! „Systembibliothek außerhalb eines Paket-Updates geändert“. Ohne geprüften Prozess gleicht der Agent solche Dateien
-//! deshalb mit der Paketdatenbank ab: Stimmt die Prüfsumme mit dem Eintrag des besitzenden Pakets überein (dpkg: MD5
-//! aus `<paket>.md5sums`, rpm: SHA-256 aus der RPM-Datenbank), ist es eine Datei aus einem Paket. Eine manipulierte
-//! Datei hat eine andere Prüfsumme und wird weiter gemeldet. Die Paketdatenbank kann nur root ändern.
+//! Real-world case: `unattended-upgrades` updated the package `sos`; a new file from it was only found by
+//! the periodic scan 10 minutes later – after the package update window – which caused the critical false alarm
+//! "system library changed outside a package update". Without a verified process the agent therefore checks such
+//! files against the package database: if the checksum matches the entry of the owning package (dpkg: MD5
+//! from `<package>.md5sums`, rpm: SHA-256 from the RPM database), it is a file from a package. A tampered
+//! file has a different checksum and is still reported. Only root can modify the package database.
 //!
-//! Bewusst sparsam: nur für Systemordner, nur ohne Paket-Markierung, höchstens `PER_MINUTE` Abfragen je Minute
-//! (Paket-Updates selbst sind über den geprüften Prozess bzw. das Update-Fenster markiert), je Aufruf mit Zeitgrenze.
+//! Deliberately frugal: only for system directories, only without a package tag, at most `PER_MINUTE` queries per
+//! minute (package updates themselves are tagged via the verified process or the update window), each call with a
+//! timeout.
 
 use std::io::Read;
 use std::process::{Command, Stdio};
@@ -18,8 +19,8 @@ use std::time::{Duration, Instant};
 const PER_MINUTE: u32 = 120;
 const TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Systemordner, in denen Paketdateien liegen (Regeln „Systemprogramm/Bibliothek geändert“), und /etc für
-/// Konfigurationsdateien aus Paketen (Praxisfall: /etc/sudoers beim Update des Pakets sudo)
+/// System directories that hold package files (rules "system program/library changed"), and /etc for
+/// configuration files from packages (real-world case: /etc/sudoers during an update of the sudo package)
 pub fn in_scope(path: &str) -> bool {
     ["/usr/bin/", "/usr/sbin/", "/usr/lib/", "/usr/lib64/", "/usr/libexec/", "/bin/", "/sbin/", "/lib/", "/lib64/", "/etc/"]
         .iter()
@@ -44,7 +45,7 @@ fn take_budget() -> bool {
     true
 }
 
-/// Befehl mit Zeitgrenze ausführen; Ausgabe (stdout) bei Erfolg
+/// Run a command with a timeout; returns its output (stdout) on success
 fn run(cmd: &str, args: &[&str]) -> Option<String> {
     let mut child = Command::new(cmd).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().ok()?;
     let deadline = Instant::now() + TIMEOUT;
@@ -65,7 +66,7 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
     }
 }
 
-/// Ausgabe von `dpkg-query -S <pfad>` → besitzende Pakete (ohne Umleitungen/„diversion“-Zeilen)
+/// Output of `dpkg-query -S <path>` → owning packages (without diversion lines)
 pub fn parse_dpkg_search(out: &str, path: &str) -> Vec<String> {
     let mut pkgs = Vec::new();
     for l in out.lines() {
@@ -81,7 +82,7 @@ pub fn parse_dpkg_search(out: &str, path: &str) -> Vec<String> {
     pkgs
 }
 
-/// MD5 eines Pfads aus einer `.md5sums`-Datei (Zeilen „<md5>  <pfad ohne führendes />“)
+/// MD5 of a path from a `.md5sums` file (lines "<md5>  <path without leading />")
 pub fn md5_from_list(list: &str, path: &str) -> Option<String> {
     let rel = path.trim_start_matches('/');
     list.lines().find_map(|l| {
@@ -90,7 +91,7 @@ pub fn md5_from_list(list: &str, path: &str) -> Option<String> {
     })
 }
 
-/// MD5 einer Konfigurationsdatei aus `dpkg-query -W -f='${Conffiles}'` (Zeilen „ <pfad> <md5>[ obsolete]“)
+/// MD5 of a configuration file from `dpkg-query -W -f='${Conffiles}'` (lines " <path> <md5>[ obsolete]")
 pub fn md5_from_conffiles(out: &str, path: &str) -> Option<String> {
     out.lines().find_map(|l| {
         let mut it = l.split_whitespace();
@@ -99,7 +100,7 @@ pub fn md5_from_conffiles(out: &str, path: &str) -> Option<String> {
     })
 }
 
-/// SHA-256 eines Pfads aus `rpm -qf --qf '[%{FILENAMES}\t%{FILEDIGESTS}\n]'`
+/// SHA-256 of a path from `rpm -qf --qf '[%{FILENAMES}\t%{FILEDIGESTS}\n]'`
 pub fn sha256_from_rpm(out: &str, path: &str) -> Option<String> {
     out.lines().find_map(|l| {
         let (p, d) = l.split_once('\t')?;
@@ -111,7 +112,7 @@ fn first_word(out: Option<String>) -> Option<String> {
     out?.split_whitespace().next().map(|s| s.to_ascii_lowercase())
 }
 
-/// merged-/usr: dpkg führt Dateien teils als /lib/…, auf dem System liegen sie unter /usr/lib/… (und umgekehrt)
+/// merged /usr: dpkg sometimes lists files as /lib/…, while on the system they live under /usr/lib/… (and vice versa)
 fn variants(path: &str) -> Vec<String> {
     let mut v = vec![path.to_string()];
     match path.strip_prefix("/usr") {
@@ -130,11 +131,11 @@ fn dpkg_matches(path: &str) -> Option<bool> {
         let Some(out) = run("dpkg-query", &["-S", "--", &p]) else { continue };
         for pkg in parse_dpkg_search(&out, &p) {
             let name = pkg.split(':').next().unwrap_or(&pkg).to_string();
-            // Konfigurationsdatei: Prüfsumme der unveränderten Paketfassung steht in der Paketdatenbank (Conffiles) –
-            // stimmt sie überein, ist es genau die Datei aus dem Paket (eine zusätzliche Zeile ändert die Prüfsumme)
+            // configuration file: the checksum of the unmodified package version is in the package database (Conffiles) –
+            // if it matches, it is exactly the file from the package (an extra line changes the checksum)
             if p.starts_with("/etc/") {
                 let have = first_word(run("md5sum", &["--", path]))?;
-                // dpkg trägt die neue Prüfsumme erst nach dem Austausch der Datei ein – bei Abweichung einmal kurz warten
+                // dpkg records the new checksum only after replacing the file – on mismatch, wait briefly once
                 for attempt in 0..2 {
                     if attempt > 0 {
                         std::thread::sleep(Duration::from_millis(1500));
@@ -170,8 +171,8 @@ fn rpm_matches(path: &str) -> Option<bool> {
     Some(false)
 }
 
-/// true = Datei gehört zu einem Paket und ist unverändert. Ohne Paketdatenbank, ohne Budget oder bei Fehlern: false
-/// (dann gelten die üblichen Regeln – lieber ein Alarm zu viel als einer zu wenig).
+/// true = the file belongs to a package and is unmodified. Without a package database, without budget or on errors:
+/// false (then the usual rules apply – better one alert too many than one too few).
 pub fn from_package(path: &str) -> bool {
     if !in_scope(path) || !take_budget() {
         return false;
@@ -191,7 +192,7 @@ mod tests {
         assert_eq!(parse_dpkg_search(out, "/bin/sh"), vec!["dash"]);
         let out = "libc6:amd64, libc6-dev:amd64: /usr/lib/x86_64-linux-gnu/libc.so.6\n";
         assert_eq!(parse_dpkg_search(out, "/usr/lib/x86_64-linux-gnu/libc.so.6"), vec!["libc6:amd64", "libc6-dev:amd64"]);
-        // anderer Pfad (Ordner-Treffer) zählt nicht
+        // a different path (directory match) does not count
         assert!(parse_dpkg_search("coreutils: /usr/bin\n", "/usr/bin/ls").is_empty());
     }
 
@@ -203,14 +204,14 @@ mod tests {
         let d = "ab".repeat(32);
         let out = format!("/usr/bin/ls\t{d}\n/usr/bin/dir\t\n");
         assert_eq!(sha256_from_rpm(&out, "/usr/bin/ls").as_deref(), Some(d.as_str()));
-        assert_eq!(sha256_from_rpm(&out, "/usr/bin/dir"), None); // leerer Digest (Symlink/Ordner)
+        assert_eq!(sha256_from_rpm(&out, "/usr/bin/dir"), None); // empty digest (symlink/directory)
     }
 
     #[test]
     fn conffile_lookup() {
         let out = " /etc/sudoers 0123456789abcdef0123456789abcdef\n /etc/sudo.conf ffffffffffffffffffffffffffffffff\n /etc/old.conf aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa obsolete\n";
         assert_eq!(md5_from_conffiles(out, "/etc/sudoers").as_deref(), Some("0123456789abcdef0123456789abcdef"));
-        assert_eq!(md5_from_conffiles(out, "/etc/old.conf"), None); // nicht mehr Teil des Pakets
+        assert_eq!(md5_from_conffiles(out, "/etc/old.conf"), None); // no longer part of the package
         assert_eq!(md5_from_conffiles(out, "/etc/other"), None);
         assert!(in_scope("/etc/sudoers"));
     }
