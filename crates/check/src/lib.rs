@@ -2,13 +2,18 @@
 //! Runs without the central server; compares against external references (WordPress.org)
 //! plus a local inventory. Result: findings with severity + a "please confirm" list.
 
+pub mod app;
+pub mod apphard;
+pub mod composer;
 pub mod gitindex;
 pub mod pkg;
 pub mod persistence;
+pub mod plugins;
 pub mod system;
 pub mod timeline;
 pub mod web;
 pub mod wordpress;
+pub mod wpthemes;
 /// Safe reading under foreign roots (containers) – for crates without a direct dependency on tyrosd-core
 pub use tyrosd_core::rootfs;
 
@@ -85,6 +90,12 @@ pub struct Report {
     /// Programs/libraries with package, version and md5 – compared against official packages on the central server
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub binaries: Vec<BinaryRef>,
+    /// Hashes of the installed Composer packages per project (since 0.5.10; only when due, see `composer`)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub composer: Vec<composer::ComposerProject>,
+    /// Hashes of the WordPress themes per installation (since 0.5.10; only when due, see `wpthemes`)
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub wp_themes: Vec<wpthemes::WpThemes>,
 }
 
 #[derive(Serialize, Clone, Debug)]
@@ -128,6 +139,8 @@ pub struct CheckConfig {
     pub timeline_days: i64,
     pub skip_suid_scan: bool,
     pub skip_dpkg_verify: bool,
+    /// Folder for the "last sent" state of the package/theme hashes; `None`: no hashes in the report
+    pub state_dir: Option<String>,
 }
 
 impl Default for CheckConfig {
@@ -139,6 +152,7 @@ impl Default for CheckConfig {
             timeline_days: 90,
             skip_suid_scan: false,
             skip_dpkg_verify: false,
+            state_dir: None,
         }
     }
 }
@@ -235,6 +249,17 @@ pub fn run(mut cfg: CheckConfig) -> Report {
     ctx.stat("webroots", ctx.cfg.webroots.clone());
 
     wordpress::check(&mut ctx);
+    let apps = app::detect(&ctx.cfg.webroots);
+    apphard::check(&mut ctx, &apps);
+    if let Some(dir) = ctx.cfg.state_dir.clone() {
+        let dir = std::path::Path::new(&dir);
+        ctx.report.composer = composer::hashes(&apps, &dir.join("composer_sent.json"), false);
+        ctx.report.wp_themes = wpthemes::hashes(&apps, &dir.join("wp_themes_sent.json"), false);
+        let files: usize = ctx.report.composer.iter().flat_map(|p| &p.packages).map(|p| p.files.len() + p.large.len()).sum();
+        ctx.stat("composer_hashed_files", files);
+        let files: usize = ctx.report.wp_themes.iter().flat_map(|w| &w.themes).map(|t| t.files.len() + t.large.len()).sum();
+        ctx.stat("wp_theme_hashed_files", files);
+    }
     web::check(&mut ctx);
     persistence::check(&mut ctx);
     system::check(&mut ctx);

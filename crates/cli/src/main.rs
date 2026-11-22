@@ -328,7 +328,7 @@ fn main() -> Result<()> {
             std::process::exit(if ok { 0 } else { 1 });
         }
         Cmd::Check { webroots, offline, sysroot, json_out, days, skip_suid_scan, max_findings } => {
-            let cfg = tyrosd_check::CheckConfig { sysroot, webroots, offline, timeline_days: days, skip_suid_scan, skip_dpkg_verify: false };
+            let cfg = tyrosd_check::CheckConfig { sysroot, webroots, offline, timeline_days: days, skip_suid_scan, skip_dpkg_verify: false, state_dir: None };
             let report = tyrosd_check::run(cfg);
             print!("{}", tyrosd_check::render_text(&report, max_findings));
             if let Some(p) = json_out {
@@ -1035,9 +1035,10 @@ fn run_agent(config: &str) -> Result<()> {
             let mut last_sent = std::time::Instant::now();
             std::thread::sleep(Duration::from_secs(20));
             while !st.load(Ordering::Relaxed) {
-                let mut inv = tyrosd_inventory::collect();
-                // Locations for decoys: same as for placing and write permission (incl. web server configuration)
-                inv.webroots = decoy::webroots();
+                // Locations for decoys and app detection: same as for placing and write permission (incl. web server configuration)
+                let inv = tyrosd_inventory::collect_in(decoy::webroots());
+                // app roots for the deploy detection (process starts)
+                tyrosd_detect::set_app_roots(inv.apps.iter().map(|a| a.root.clone()).collect());
                 let fp = tyrosd_inventory::fingerprint(&inv);
                 if fp != last || last_sent.elapsed() > Duration::from_secs(6 * 3600) {
                     if let Ok(js) = serde_json::to_vec(&inv) {
@@ -1101,7 +1102,8 @@ fn run_agent(config: &str) -> Result<()> {
                 let asked = CHECK_REQUESTED.swap(false, Ordering::SeqCst);
                 if due || asked {
                     log(if asked { "Compromise check (requested) …" } else { "Compromise check …" });
-                    let report = tyrosd_check::run(tyrosd_check::CheckConfig::default());
+                    // state of the package/theme hashes (sent only when changed, otherwise every 7 days) in the data folder
+                    let report = tyrosd_check::run(tyrosd_check::CheckConfig { state_dir: Some(dd.clone()), ..Default::default() });
                     log(format!("Compromise check done: {} findings", report.findings.len()));
                     if let Ok(js) = serde_json::to_vec(&report) {
                         let z = zstd::encode_all(&js[..], 3).unwrap_or_default();

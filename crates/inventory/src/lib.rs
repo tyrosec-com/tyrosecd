@@ -9,6 +9,9 @@ use std::process::Command;
 
 use serde::Serialize;
 
+/// Detected web applications (kind, version, root, media/cache folders, plugins) – implemented in the check crate,
+/// which runs the per-app hardening checks on the same data
+pub use tyrosd_check::app;
 pub mod backup;
 pub mod containers;
 pub mod dbconf;
@@ -43,6 +46,8 @@ pub struct Inventory {
     /// Beaconing sample: last completed hour (since 0.5.2; new outgoing connections per minute)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub beacons: Option<tyrosd_detect::beacon::BeaconHour>,
+    /// Detected web applications (since 0.5.10): CMS, shops, frameworks with version, media/cache folders and plugins
+    pub apps: Vec<app::App>,
 }
 
 #[derive(Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -381,6 +386,19 @@ fn scope(addr: &str, public: bool) -> &'static str {
 }
 
 pub fn collect() -> Inventory {
+    collect_in(tyrosd_check::default_webroots("/"))
+}
+
+/// Like `collect`, with the given webroots (e.g. including the web server's docroots). Apps and shops are
+/// searched in these plus the default webroots.
+pub fn collect_in(webroots: Vec<String>) -> Inventory {
+    let mut search = webroots.clone();
+    search.extend(tyrosd_check::default_webroots("/"));
+    search.sort();
+    search.dedup();
+    let copy = search.clone();
+    search.retain(|a| !copy.iter().any(|b| b != a && a.starts_with(&format!("{b}/"))));
+    let apps = app::detect(&search);
     let fw = firewall();
     let owners = tyrosd_check::system::socket_owners();
     let mut seen = BTreeSet::new();
@@ -406,7 +424,6 @@ pub fn collect() -> Inventory {
     }
     listeners.sort_by(|a, b| a.port.cmp(&b.port).then(a.proto.cmp(&b.proto)));
     let ports: Vec<u16> = listeners.iter().map(|l| l.port).collect();
-    let webroots = tyrosd_check::default_webroots("/");
     let (cts, ct_pkgs) = containers::detect();
     let mut software = software::collect();
     software.packages.extend(ct_pkgs);
@@ -420,12 +437,13 @@ pub fn collect() -> Inventory {
         containers: cts,
         ssh: host::ssh("/"),
         reboot: host::reboot(),
-        shops: shop::shops(&webroots),
+        shops: shop::from_apps(&apps),
         backups: backup::detect("/"),
         sites: sites(),
         webroots,
         mysql_conf: dbconf::mysql(),
         beacons: tyrosd_detect::beacon::last_hour(),
+        apps,
     }
 }
 
@@ -475,6 +493,10 @@ pub fn fingerprint(inv: &Inventory) -> String {
     s.push_str(&format!("\nssh:{:?}\nreboot:{}:{}:{}", inv.ssh, inv.reboot.required, inv.reboot.running_kernel, inv.reboot.newest_kernel));
     for x in &inv.shops {
         s.push_str(&format!("\nshop:{}:{}:{}", x.kind, x.root, x.version));
+    }
+    for a in &inv.apps {
+        s.push_str(&format!("
+app:{}:{}:{}:{}", a.kind, a.root, a.version, a.plugins.iter().map(|p| format!("{}={}", p.name, p.version)).collect::<Vec<_>>().join(",")));
     }
     // Egress: only process + destination port (destination IPs and counts change constantly)
     let mut eg: Vec<String> = inv.egress.iter().map(|e| format!("{}:{}", e.process, e.port)).collect();

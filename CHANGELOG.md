@@ -3,8 +3,31 @@
 Each version listed here corresponds exactly to the Git tag `v<version>` and to the signed binary under
 `https://get.tyrosec.com/releases/<version>/` (rebuild: [VERIFY.md](VERIFY.md)).
 
-## Unreleased
+## 0.5.10
 
+- App detection in the web roots (also the folder above a `public`/`pub`/`web`/`htdocs` docroot): WordPress,
+  WooCommerce, Magento 2, Shopware 6 and 5, PrestaShop, JTL-Shop, Laravel, Symfony, TYPO3, Contao, Joomla, Drupal,
+  Nextcloud, Next.js and Nuxt with version, their media/upload and cache folders and their plugins, modules and themes
+  (WordPress plugins/themes, Magento `app/code`, Shopware `custom/plugins`, PrestaShop `modules`). New inventory field
+  `apps`; shops are derived from the same detection. Bounded walks, symbolic links are not followed.
+- Compromise check, per detected app (read only):
+  - `app_debug_mode` (high): debug/developer mode in production (Laravel `APP_DEBUG`, also a cached configuration;
+    Symfony/Shopware/Contao `APP_ENV=dev` from `.env`/`.env.local`/`.env.local.php`; Magento `MAGE_MODE` developer;
+    WordPress `WP_DEBUG` without `WP_DEBUG_DISPLAY` false; Joomla and Nextcloud `debug`).
+  - `app_install_tool` (high): TYPO3 `ENABLE_INSTALL_TOOL`, Joomla `installation/`, PrestaShop/JTL-Shop `install/`,
+    leftover Shopware installers.
+  - `app_config_writable` (medium): configuration file writable by all users.
+  - `vendor_changed_after_install` (medium): code files under `vendor/` newer than `composer.lock` or
+    `vendor/composer/installed.json` plus one hour (at most 50,000 entries walked, up to 20 paths listed).
+  - `composer_autoload_foreign` (high): the Composer autoloader loads files that belong neither to an installed package
+    nor to the project's autoload configuration, or contains code Composer does not generate.
+- Check report: SHA-256 of all files of the installed Composer packages (field `composer`) and of the WordPress themes
+  (field `wp_themes`) for the comparison with the original packages – only when the lock file, `installed.json` or the
+  theme versions changed since the last report, otherwise at most every 7 days (limits: 100,000 package files, 30,000
+  theme files, files over 5 MiB by size only).
+- Detection `deploy_activity` (info): deploy or update command (composer install/update, bin/magento setup:upgrade …,
+  artisan migrate/optimize, bin/console system:update/plugin:update/cache:clear, wp core/plugin/theme update,
+  dep deploy, git pull/checkout/reset) started inside a detected app root.
 - Rollout templates in `deploy/`: a cloud-init file (`deploy/cloud-init.yaml`) and an idempotent Ansible role
   (`deploy/ansible/roles/tyrosecd`, example playbook `deploy/ansible/site.yml`). Both use the official installer and
   pass the enrolment token only as a root-only file that is removed afterwards.

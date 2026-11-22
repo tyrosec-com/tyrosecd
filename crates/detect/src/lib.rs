@@ -5,10 +5,13 @@
 //! - **Reverse shell**: shell/interpreter whose stdin/stdout is an outgoing TCP connection.
 //! - **Outgoing connections** (every 20 s): SMTP from a non-mail server (spam), mining ports/programs.
 //!
+//! - **Deploy activity** (info): deploy/update command started inside a known app root (`deploy`).
+//!
 //! Read only, block nothing. Every detection carries the process chain and a key for
 //! deduplication on the server.
 
 pub mod beacon;
+pub mod deploy;
 pub mod dns;
 pub mod net;
 pub mod proc;
@@ -34,6 +37,8 @@ const MTA: &[&str] = &["master", "smtp", "postfix", "exim", "exim4", "sendmail",
 const MALWARE: &[&str] = &["xmrig", "kinsing", "kdevtmpfsi", "minerd", "cpuminer", "xmr-stak", "t-rex", "nbminer", "lolminer", "sysupdate", "networkservice", "kthreaddi", "dbused"];
 /// Package management/installers: checked via the program file (`trust::installer_ancestor`), not via the name
 use tyrosd_core::trust;
+
+pub use deploy::set_app_roots;
 
 /// Program file is in a temporary/hidden directory or was deleted after the start.
 /// `pid`: process (for the AppImage check: the process's user must match the FUSE mount).
@@ -158,6 +163,15 @@ pub fn on_exec(pid: u32) -> Option<Detection> {
             let hit = m.as_str().to_lowercase();
             return Some(det("suspicious_command", "medium", format!("Suspicious command started: {}", hit.trim()),
                 p.cmdline.clone(), &p, chain, hit));
+        }
+    }
+    // 5) Deploy command inside an app root (info; key = app root, at most every 10 min via `run`)
+    if deploy::deploy_command(&p.cmdline).is_some() {
+        let roots = deploy::app_roots();
+        if let Some((cmd, root)) = deploy::deploy_match(&p.cmdline, deploy::cwd(pid).as_deref(), &roots) {
+            return Some(det("deploy_activity", "info", format!("Deploy command started: {cmd}"),
+                format!("Command: {}
+App root: {root}", p.cmdline), &p, chain, root));
         }
     }
     None
