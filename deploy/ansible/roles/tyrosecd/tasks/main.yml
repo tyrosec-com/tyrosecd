@@ -1,0 +1,77 @@
+---
+# Installs and enrols tyrosecd once. Servers that are already enrolled (agent.toml contains a host_id) are left
+# alone: the agent updates itself with signed releases, so re-running the installer is not needed.
+
+- name: Check that an enrolment token is set
+  ansible.builtin.assert:
+    that:
+      - tyrosecd_token is string
+      - tyrosecd_token | trim | length > 0
+    fail_msg: "tyrosecd_token is not set - create a token in the web interface and store it in ansible-vault"
+    quiet: true
+
+- name: Look for an existing agent configuration
+  ansible.builtin.stat:
+    path: /etc/tyrosecd/agent.toml
+  register: tyrosecd_config
+
+- name: Check whether the agent is already enrolled
+  ansible.builtin.command:
+    argv: [grep, -q, '^host_id = "[^"]', /etc/tyrosecd/agent.toml]
+  register: tyrosecd_enrolled_check
+  changed_when: false
+  failed_when: tyrosecd_enrolled_check.rc not in [0, 1]
+  when: tyrosecd_config.stat.exists
+
+- name: Decide whether to install
+  ansible.builtin.set_fact:
+    tyrosecd_needs_install: "{{ not tyrosecd_config.stat.exists or (tyrosecd_enrolled_check.rc | default(1)) != 0 }}"
+
+- name: Install and enrol tyrosecd
+  when: tyrosecd_needs_install | bool
+  block:
+    - name: Download the installer
+      ansible.builtin.get_url:
+        url: "{{ tyrosecd_install_url }}"
+        dest: "{{ tyrosecd_installer_file }}"
+        owner: root
+        group: root
+        mode: "0700"
+        force: true
+
+    - name: Write the enrolment token (root only)
+      ansible.builtin.copy:
+        content: "{{ tyrosecd_token | trim }}\n"
+        dest: "{{ tyrosecd_token_file }}"
+        owner: root
+        group: root
+        mode: "0600"
+      no_log: true
+
+    - name: Run the installer
+      ansible.builtin.command:
+        argv: "{{ ['sh', tyrosecd_installer_file, '--token-file=' + tyrosecd_token_file, '--server=' + tyrosecd_server]
+                  + tyrosecd_install_args }}"
+      register: tyrosecd_install
+      changed_when: true
+
+  always:
+    - name: Remove the enrolment token and the installer
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - "{{ tyrosecd_token_file }}"
+        - "{{ tyrosecd_installer_file }}"
+
+- name: Make sure tyrosecd is enabled and running
+  ansible.builtin.systemd_service:
+    name: tyrosecd
+    enabled: true
+    state: started
+  when:
+    - tyrosecd_manage_service | bool
+    - "'--no-start' not in tyrosecd_install_args"
+    - ansible_facts.service_mgr | default('systemd') == 'systemd'
+    # in check mode the installer does not run, so a new server has no unit yet
+    - not (ansible_check_mode and (tyrosecd_needs_install | bool))

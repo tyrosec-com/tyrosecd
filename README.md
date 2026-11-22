@@ -44,6 +44,18 @@ system calls – each with its justification in [install/install.sh](install/ins
   approval the service lacks the necessary write permissions.
 - It opens no ports and accepts no commands from the internet; it only connects out to the central service.
 
+## Automated rollout
+
+For many servers, two ready-made templates are in [`deploy/`](deploy/) (the web interface shows them filled in with
+your token under "Add server"):
+
+- [cloud-init](deploy/cloud-init.md): installs and enrols the agent on the first boot of a new cloud server.
+- [Ansible role `tyrosecd`](deploy/ansible/roles/tyrosecd/README.md): idempotent rollout to existing servers, token
+  from ansible-vault.
+
+Both use the official installer (signature check) and pass the enrolment token only as a root-only file that is
+deleted afterwards. One token can enrol several servers if it is created with enough "uses".
+
 ## Layout
 
 | Directory | Contents |
@@ -57,6 +69,7 @@ system calls – each with its justification in [install/install.sh](install/ins
 | `crates/transport` | Connection to the central service, spool, signed updates |
 | `crates/yara` | Malware rules |
 | `install/install.sh` | Installer including the systemd unit |
+| `deploy/` | Rollout templates: cloud-init, Ansible role |
 | `build/` | Pinned build environment for rebuilding |
 
 ## Reporting security issues

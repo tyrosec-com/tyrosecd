@@ -3,6 +3,12 @@
 Each version listed here corresponds exactly to the Git tag `v<version>` and to the signed binary under
 `https://get.tyrosec.com/releases/<version>/` (rebuild: [VERIFY.md](VERIFY.md)).
 
+## Unreleased
+
+- Rollout templates in `deploy/`: a cloud-init file (`deploy/cloud-init.yaml`) and an idempotent Ansible role
+  (`deploy/ansible/roles/tyrosecd`, example playbook `deploy/ansible/site.yml`). Both use the official installer and
+  pass the enrolment token only as a root-only file that is removed afterwards.
+
 ## 0.5.9
 
 - Compromise check: a hidden directory in a temporary folder that is empty, or that is the temporary profile of a

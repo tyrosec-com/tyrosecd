@@ -1,0 +1,21 @@
+---
+# Enrolment token from the web interface ("Add server") or from the API (POST /api/v1/enroll-tokens).
+# Required. It is a secret: keep it in ansible-vault (or another secret store), never in plain text in a repository.
+# One token can enrol several servers if it was created with enough "uses".
+tyrosecd_token: ""
+
+# Central server the agent connects to (shown in the web interface).
+tyrosecd_server: "https://ingest.tyrosec.com"
+
+# Official installer. It verifies the release signature before installing anything.
+tyrosecd_install_url: "https://get.tyrosec.com/install.sh"
+
+# Additional installer options, e.g. ["--version=0.5.9"] or ["--no-start"].
+tyrosecd_install_args: []
+
+# Where the token and the installer are stored temporarily on the target (both are removed afterwards).
+tyrosecd_token_file: /root/tyrosec.token
+tyrosecd_installer_file: /root/tyrosec-install.sh
+
+# Make sure the service is enabled and running (systemd only).
+tyrosecd_manage_service: true

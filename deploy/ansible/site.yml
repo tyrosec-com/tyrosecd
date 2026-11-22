@@ -1,0 +1,10 @@
+---
+# Example playbook: install and enrol tyrosecd on all hosts of the group "tyrosec".
+#
+#   ansible-vault create group_vars/tyrosec/vault.yml   # content: tyrosecd_token: "ENR_..."
+#   ansible-playbook -i inventory.ini site.yml --ask-vault-pass
+- name: Roll out the tyrosec agent
+  hosts: tyrosec
+  become: true
+  roles:
+    - role: tyrosecd

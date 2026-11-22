@@ -1,0 +1,29 @@
+#cloud-config
+# tyrosecd - install and enrol the tyrosec agent on first boot.
+#
+# Replace the two placeholders before use:
+#   ENR_REPLACE_WITH_YOUR_TOKEN  enrolment token from the web interface ("Add server") or from the API
+#                                (POST /api/v1/enroll-tokens). For several servers create one token with enough
+#                                "uses" and a short validity.
+#   https://ingest.tyrosec.com   central server shown in the web interface (keep the default unless told otherwise)
+#
+# The token is a secret: keep this file out of public repositories. It is written to a file readable by root only,
+# passed to the installer as a file (never as a command-line argument) and deleted afterwards - also if the
+# installation fails. The installer verifies the signature of the release before installing anything.
+#
+# If you merge this into existing user data, keep the write_files and runcmd entries.
+
+write_files:
+  - path: /root/tyrosec.token
+    owner: root:root
+    permissions: "0600"
+    content: |
+      ENR_REPLACE_WITH_YOUR_TOKEN
+
+runcmd:
+  - - sh
+    - -c
+    - >-
+      curl -fsSLo /root/tyrosec-install.sh https://get.tyrosec.com/install.sh
+      && sh /root/tyrosec-install.sh --token-file=/root/tyrosec.token --server=https://ingest.tyrosec.com;
+      rc=$?; rm -f /root/tyrosec.token /root/tyrosec-install.sh; exit $rc
