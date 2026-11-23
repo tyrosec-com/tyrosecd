@@ -97,11 +97,57 @@ fn is_strong(name: &str) -> bool {
 
 const SKIP_DIRS: &[&str] = &["node_modules", ".git", "cache", ".cache"];
 
+/// signature.json path → (relative path → SHA-512 hex)
+type NcCache = std::collections::HashMap<String, Option<std::collections::HashMap<String, String>>>;
+
+/// Nextcloud ships `appinfo/signature.json` per app and `core/signature.json` for the core, each with the SHA-512
+/// of every file (path relative to the app or Nextcloud root). Returns the signature list name when `path` is listed
+/// there with exactly its current hash.
+fn nextcloud_signed(cache: &mut NcCache, path: &str) -> Option<String> {
+    use sha2::{Digest, Sha512};
+    let p = std::path::Path::new(path);
+    // candidates: the nearest app directory (…/apps/<app>/ or …/apps-extra/<app>/) and the Nextcloud root (core)
+    let mut candidates: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    for anc in p.ancestors().skip(1) {
+        let sig = anc.join("appinfo/signature.json");
+        if sig.is_file() {
+            candidates.push((sig, anc.to_path_buf()));
+            break;
+        }
+        if anc.join("core/signature.json").is_file() && anc.join("version.php").is_file() {
+            candidates.push((anc.join("core/signature.json"), anc.to_path_buf()));
+            break;
+        }
+    }
+    for (sig, base) in candidates {
+        let key = sig.to_string_lossy().into_owned();
+        let list = cache.entry(key.clone()).or_insert_with(|| {
+            let meta = std::fs::symlink_metadata(&sig).ok()?;
+            if !meta.is_file() || meta.len() > 32 << 20 {
+                return None;
+            }
+            let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&sig).ok()?).ok()?;
+            let map = v.get("hashes")?.as_object()?;
+            Some(map.iter().filter_map(|(k, h)| h.as_str().map(|h| (k.clone(), h.to_ascii_lowercase()))).collect())
+        });
+        let Some(list) = list else { continue };
+        let rel = p.strip_prefix(&base).ok()?.to_string_lossy().into_owned();
+        let want = list.get(&rel)?;
+        let data = std::fs::read(p).ok()?;
+        let got = Sha512::digest(&data).iter().map(|b| format!("{b:02x}")).collect::<String>();
+        if &got == want {
+            return Some(key);
+        }
+    }
+    None
+}
+
 pub fn check(ctx: &mut Ctx) {
     let reported: HashSet<String> = ctx.report.findings.iter().filter_map(|f| f.path.clone()).collect();
     let mut scanned = 0usize;
     let mut hits_total = 0usize;
     let webroots = ctx.cfg.webroots.clone();
+    let mut nc_cache: NcCache = Default::default();
     for w in &webroots {
         detect_apps(ctx, w);
         let mut it = walkdir::WalkDir::new(w).follow_links(false).into_iter();
@@ -132,8 +178,16 @@ pub fn check(ctx: &mut Ctx) {
             let hits = scan_file(&p);
             if !hits.is_empty() {
                 hits_total += 1;
-                let sev = if hits.iter().any(|h| is_strong(h)) { Severity::High } else { Severity::Medium };
                 let title = if js && !php { "Suspicious JavaScript code (skimmer pattern)" } else { "Suspicious PHP code (web shell pattern)" };
+                // Nextcloud lists every shipped file of core and apps with its SHA-512 in a signature.json:
+                // a file matching that list is an original bundle – information only (the list itself is not
+                // verified against Nextcloud's certificate here, so the finding stays visible)
+                if let Some(list) = nextcloud_signed(&mut nc_cache, &p) {
+                    ctx.add(Severity::Info, Category::Web, "web_pattern", title, Some(p),
+                        Some(format!("Pattern: {} – file matches the Nextcloud signature list ({list})", hits.join(", "))));
+                    continue;
+                }
+                let sev = if hits.iter().any(|h| is_strong(h)) { Severity::High } else { Severity::Medium };
                 ctx.add(sev, Category::Web, "web_pattern", title, Some(p), Some(format!("Pattern: {}", hits.join(", "))));
             }
         }
@@ -231,6 +285,27 @@ fn git_check(ctx: &mut Ctx, w: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nextcloud_signature_list_marks_original_bundles() {
+        use sha2::{Digest, Sha512};
+        let root = std::env::temp_dir().join(format!("ncsig-{}", std::process::id()));
+        let app = root.join("apps/viewer");
+        std::fs::create_dir_all(app.join("appinfo")).unwrap();
+        std::fs::create_dir_all(app.join("js")).unwrap();
+        let js = b"document.querySelectorAll('input').forEach(i => fetch('/x'))";
+        std::fs::write(app.join("js/viewer.js"), js).unwrap();
+        std::fs::write(app.join("js/evil.js"), b"x").unwrap();
+        let h: String = Sha512::digest(js).iter().map(|b| format!("{b:02x}")).collect();
+        let sig = serde_json::json!({"hashes": {"js/viewer.js": h, "js/evil.js": "00"}});
+        std::fs::write(app.join("appinfo/signature.json"), sig.to_string()).unwrap();
+        let mut cache = NcCache::default();
+        assert!(nextcloud_signed(&mut cache, &app.join("js/viewer.js").to_string_lossy()).is_some());
+        assert!(nextcloud_signed(&mut cache, &app.join("js/evil.js").to_string_lossy()).is_none(), "hash differs");
+        std::fs::write(app.join("js/viewer.js"), b"changed").unwrap();
+        assert!(nextcloud_signed(&mut cache, &app.join("js/viewer.js").to_string_lossy()).is_none(), "modified file");
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn webshells() {

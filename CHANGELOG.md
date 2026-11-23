@@ -3,6 +3,12 @@
 Each version listed here corresponds exactly to the Git tag `v<version>` and to the signed binary under
 `https://get.tyrosec.com/releases/<version>/` (rebuild: [VERIFY.md](VERIFY.md)).
 
+## 0.5.12
+
+- Compromise check: a JavaScript/PHP file that matches a suspicious pattern but is listed with exactly its SHA-512
+  in Nextcloud's signature list (`appinfo/signature.json`, `core/signature.json`) is reported as information only
+  (original Nextcloud bundles).
+
 ## 0.5.11
 
 - The daily compromise check uses the same web roots as the inventory (taken from the web server configuration),
