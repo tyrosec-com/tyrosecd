@@ -85,6 +85,50 @@ fn md5(p: &str) -> Option<String> {
     tyrosd_core::hash::md5_file(p).ok()
 }
 
+/// Largest file compared byte-wise with the official original (line endings)
+const EOL_MAX: u64 = 4 << 20;
+
+/// Same content as the official file of this version apart from CRLF ↔ LF? Downloads the original from
+/// core.svn.wordpress.org (tags/<version>/<path>, read-only, size-limited).
+fn line_endings_only(version: &str, rel: &str, full: &str) -> bool {
+    if !version.chars().all(|c| c.is_ascii_digit() || c == '.') || rel.split('/').any(|s| s.is_empty() || s == "..")
+        || !rel.chars().all(|c| c.is_ascii_alphanumeric() || "/._-".contains(c))
+    {
+        return false;
+    }
+    let Ok(meta) = std::fs::symlink_metadata(full) else { return false };
+    if !meta.is_file() || meta.len() > EOL_MAX {
+        return false;
+    }
+    let Ok(local) = std::fs::read(full) else { return false };
+    let url = format!("https://core.svn.wordpress.org/tags/{version}/{rel}");
+    let Ok(resp) = agent().get(&url).call() else { return false };
+    let mut orig = Vec::new();
+    use std::io::Read;
+    if resp.into_reader().take(EOL_MAX + 1).read_to_end(&mut orig).is_err() || orig.len() as u64 > EOL_MAX {
+        return false;
+    }
+    eol_equal(&local, &orig)
+}
+
+/// Equal after normalising CRLF to LF on both sides – and actually different bytes (otherwise the hash would match)
+fn eol_equal(a: &[u8], b: &[u8]) -> bool {
+    fn norm(x: &[u8]) -> Vec<u8> {
+        let mut o = Vec::with_capacity(x.len());
+        let mut i = 0;
+        while i < x.len() {
+            if x[i] == b'\r' && x.get(i + 1) == Some(&b'\n') {
+                i += 1;
+                continue;
+            }
+            o.push(x[i]);
+            i += 1;
+        }
+        o
+    }
+    a != b && norm(a) == norm(b)
+}
+
 pub fn check(ctx: &mut Ctx) {
     let installs = find(&ctx.cfg.webroots);
     ctx.stat("wp_installs", installs.len());
@@ -136,6 +180,8 @@ fn core(ctx: &mut Ctx, wp: &WpInstall, checked: &mut usize) {
         return;
     };
     let mut modified = 0;
+    // at most this many originals are downloaded per installation for the line-ending comparison
+    let mut eol_budget = 40usize;
     let mut known: std::collections::HashSet<String> = Default::default();
     for (rel, sum) in map {
         known.insert(rel.clone());
@@ -149,6 +195,13 @@ fn core(ctx: &mut Ctx, wp: &WpInstall, checked: &mut usize) {
         match md5(&full) {
             Some(h) if h == expected => {
                 ctx.verified.insert(full);
+            }
+            Some(_) if eol_budget > 0 && { eol_budget -= 1; line_endings_only(&wp.version, rel, &full) } => {
+                // the official file mixes CRLF and LF; copied with line-ending conversion (FTP ASCII mode, git
+                // autocrlf) it differs only there – harmless (seen with wp-includes/js/dist/*.js)
+                ctx.add(Severity::Info, Category::Web, "wp_core_modified",
+                    "WordPress core file differs from official checksum only in line endings", Some(full),
+                    Some(format!("WordPress {} · content identical to the original apart from CRLF/LF line endings", wp.version)));
             }
             Some(_) => {
                 modified += 1;
@@ -332,5 +385,16 @@ fn mu_plugins(ctx: &mut Ctx, wp: &WpInstall) {
             }
             ctx.confirm("wp_mu_plugin", full, "Must-use plugin (always loaded)");
         }
+    }
+}
+
+#[cfg(test)]
+mod eol_tests {
+    #[test]
+    fn eol_only_difference() {
+        assert!(super::eol_equal(b"a\r\nb\n;", b"a\nb\n;"));
+        assert!(!super::eol_equal(b"a\nb", b"a\nb"), "identical bytes are not an eol difference");
+        assert!(!super::eol_equal(b"a\r\nb\nevil();", b"a\nb\n"), "extra code");
+        assert!(!super::eol_equal(b"a\rb", b"ab"), "lone CR is content");
     }
 }

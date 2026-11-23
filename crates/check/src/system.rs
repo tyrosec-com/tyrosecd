@@ -504,6 +504,12 @@ fn from_tmp(exe: &str, pid: i32) -> bool {
     TMP_DIRS.iter().any(|t| exe.starts_with(&format!("{t}/"))) && !tyrosd_core::trust::appimage_for(exe, Some(pid))
 }
 
+/// Parent PID from /proc/<pid>/stat (field 4, after the parenthesised comm)
+fn ppid(pid: i32) -> Option<i32> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?.1.split_whitespace().nth(1)?.parse().ok()
+}
+
 fn processes(ctx: &mut Ctx) {
     let Ok(rd) = std::fs::read_dir("/proc") else { return };
     let mut n = 0;
@@ -523,6 +529,12 @@ fn processes(ctx: &mut Ctx) {
             ctx.add(Severity::Critical, Category::Runtime, "proc_from_tmp", "Process runs from a temporary directory", Some(exe.clone()), Some(desc.clone()));
         }
         if let Some(orig) = exe.strip_suffix(" (deleted)") {
+            // kernel usermode helper (e.g. bpfilter_umh on Ubuntu 20.04 kernels): started by the kernel from an
+            // in-memory image, exe shows as "/ (deleted)", parent is kthreadd (PID 2) – not a user process
+            if orig == "/" && ppid(pid) == Some(2) {
+                ctx.add(Severity::Info, Category::Runtime, "proc_kernel_helper", "Kernel usermode helper (started by the kernel)", Some(exe.clone()), Some(desc.clone()));
+                continue;
+            }
             if std::path::Path::new(orig).exists() && (orig.starts_with("/usr/") || orig.starts_with("/opt/")) {
                 ctx.add(Severity::Low, Category::Runtime, "proc_stale_after_update", "Process not restarted after update", Some(orig.to_string()), Some(desc.clone()));
             } else {

@@ -3,6 +3,14 @@
 Each version listed here corresponds exactly to the Git tag `v<version>` and to the signed binary under
 `https://get.tyrosec.com/releases/<version>/` (rebuild: [VERIFY.md](VERIFY.md)).
 
+## 0.5.13
+
+- Compromise check: a WordPress core file whose checksum differs only because of CRLF/LF line-ending conversion
+  (FTP ASCII mode, git autocrlf) is reported as information only; the original is fetched read-only from
+  core.svn.wordpress.org (at most 40 files per installation, 4 MB each).
+- Compromise check: kernel usermode helpers (e.g. `bpfilter_umh`, program shown as `/ (deleted)`, parent kthreadd)
+  are no longer reported as a process whose program file was deleted.
+
 ## 0.5.12
 
 - Compromise check: a JavaScript/PHP file that matches a suspicious pattern but is listed with exactly its SHA-512
