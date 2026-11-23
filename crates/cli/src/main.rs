@@ -1103,7 +1103,9 @@ fn run_agent(config: &str) -> Result<()> {
                 if due || asked {
                     log(if asked { "Compromise check (requested) …" } else { "Compromise check …" });
                     // state of the package/theme hashes (sent only when changed, otherwise every 7 days) in the data folder
-                    let report = tyrosd_check::run(tyrosd_check::CheckConfig { state_dir: Some(dd.clone()), ..Default::default() });
+                    // same webroots as the inventory (web server configuration incl. non-standard docroots),
+                    // otherwise applications outside /var/www are never checked
+                    let report = tyrosd_check::run(tyrosd_check::CheckConfig { webroots: decoy::webroots(), state_dir: Some(dd.clone()), ..Default::default() });
                     log(format!("Compromise check done: {} findings", report.findings.len()));
                     if let Ok(js) = serde_json::to_vec(&report) {
                         let z = zstd::encode_all(&js[..], 3).unwrap_or_default();

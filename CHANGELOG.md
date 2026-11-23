@@ -3,6 +3,14 @@
 Each version listed here corresponds exactly to the Git tag `v<version>` and to the signed binary under
 `https://get.tyrosec.com/releases/<version>/` (rebuild: [VERIFY.md](VERIFY.md)).
 
+## 0.5.11
+
+- The daily compromise check uses the same web roots as the inventory (taken from the web server configuration),
+  so applications outside the standard folders are checked too (hardening, Composer, WordPress themes).
+- The official tyrosec installer (`curl https://get.tyrosec.com/install.sh | sh`) is no longer reported as a
+  suspicious command – only if the command line fetches nothing but get.tyrosec.com and contains nothing else
+  suspicious.
+
 ## 0.5.10
 
 - App detection in the web roots (also the folder above a `public`/`pub`/`web`/`htdocs` docroot): WordPress,
