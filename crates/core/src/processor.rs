@@ -606,6 +606,13 @@ impl Processor {
             .filter(|m| m.mode & libc::S_IFMT == libc::S_IFREG && m.size <= MAX_HASH)
             .and_then(|_| hash::hash_file_nofollow(Algo::Sha256, &inp.path).ok())
             .map(|(h, _, _)| h);
+        // started by verified package management (dpkg-preconfigure runs tzdata.config from /tmp during
+        // unattended-upgrades): mark it, real-time protection would never block that
+        let note = if procinfo::is_package_manager(inp.proc.as_ref()) {
+            Some(inp.note.map_or_else(|| "pkg".to_string(), |n| format!("{n},pkg")))
+        } else {
+            inp.note
+        };
         self.finish(Event {
             ts_ns: inp.ts_ns,
             first_ts_ns: inp.first_ts_ns,
@@ -623,7 +630,7 @@ impl Processor {
             diff_lines: None,
             diff_bytes: None,
             meta,
-            note: inp.note,
+            note,
             diff: None,
             patch: None,
             content: None,
@@ -777,6 +784,23 @@ mod tests {
         assert!(!has_pkg(&run(&|i| Some(proc("dpkg", i != 17)))));
         // without a process and without a package update window: no marker
         assert!(!has_pkg(&run(&|_| None)));
+    }
+
+    /// Program start by verified package management carries `pkg` (trial run real-time protection)
+    #[test]
+    fn exec_by_package_manager_is_marked() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = State::open(&dir.path().join("s.redb").to_string_lossy(), 4, 1 << 20).unwrap();
+        let evs = Arc::new(Mutex::new(Vec::new()));
+        let p = Processor::new(Arc::new(Policy::default_policy()), st, Box::new(Collect(evs.clone())), Algo::Sha256);
+        let proc = |pkg: bool| ProcInfo { pid: 4243, exe: Some("/usr/bin/perl".into()), comm: Some("dpkg-preconfigu".into()),
+            chain: vec!["dpkg-preconfigu".into(), "unattended-upgr".into()], gone: false, pkg };
+        for pkg in [true, false] {
+            p.process(Input { op: Op::Exec, proc: Some(proc(pkg)), note: Some("exec_shadow,exec_dir:/tmp".into()), ..input("/tmp/tzdata.config.x") });
+        }
+        let evs = evs.lock().unwrap();
+        assert_eq!(evs[0].note.as_deref(), Some("exec_shadow,exec_dir:/tmp,pkg"));
+        assert_eq!(evs[1].note.as_deref(), Some("exec_shadow,exec_dir:/tmp"), "name alone does not count");
     }
 
     #[test]

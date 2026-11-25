@@ -3,6 +3,11 @@
 Each version listed here corresponds exactly to the Git tag `v<version>` and to the signed binary under
 `https://get.tyrosec.com/releases/<version>/` (rebuild: [VERIFY.md](VERIFY.md)).
 
+## 0.5.15
+- Real-time protection trial run: program starts by verified package management (e.g. `dpkg-preconfigure`
+  running `tzdata.config` from /tmp during unattended upgrades) carry the package marker and are no longer
+  counted as would-be blocks.
+
 ## 0.5.14
 - Compromise check: the `FilesMan` web shell signature only matches as a whole word – Next.js bundles contain
   `serverFilesManifest` and were reported as malicious code.
