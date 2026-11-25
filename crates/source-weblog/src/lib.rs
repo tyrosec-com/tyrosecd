@@ -412,6 +412,10 @@ Decoy #{}", d.id), format!("decoy:{}", d.id))
             self.probe(r);
         } else if (400..500).contains(&r.status) && sensitive(&r.path).is_some() {
             self.probe(r);
+        } else if (300..400).contains(&r.status) && (sensitive(&r.path).is_some() || scanner_path(&r.path)) {
+            // the site redirects everything unknown (www redirect, 404-to-home plugin): scanner paths still count –
+            // otherwise such scans stay invisible
+            self.probe(r);
         }
         // 4. WordPress login: POST wp-login.php → 302 = success, 200 = wrong password; xmlrpc = attempt.
         // Exception: the website also redirects other requests with an equally sized 302 response – then the login's 302
@@ -804,6 +808,18 @@ mod tests {
         assert_eq!((v["total"].as_u64(), v["ips"][0]["ip"].as_str(), v["ips"][0]["n"].as_u64()), (Some(4), Some("91.92.93.20"), Some(4)));
         assert!(a.flush(true).is_empty()); // reset
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn redirected_scanner_paths_count_as_probes() {
+        let mut a = Analyzer::new(Arc::new(RecentPhp::default()));
+        for (p, st) in [("/.env", 301), ("/phpmyadmin/index.php", 302), ("/wp-config.php.save", 302), ("/about-us", 301)] {
+            let r = parse_line(&format!(r#"198.51.100.9 - - [23/Nov/2026:07:17:00 +0100] "GET {p} HTTP/1.1" {st} 400 "-" "x""#)).unwrap();
+            assert!(a.feed(&r, "l").is_empty(), "{p}");
+        }
+        let Some(Out::Detect(d)) = a.flush(true).into_iter().next() else { panic!("no statistics") };
+        let v: serde_json::Value = serde_json::from_str(&d.detail).unwrap();
+        assert_eq!(v["ips"][0]["n"].as_u64(), Some(3), "three scanner paths, the normal page does not count");
     }
 
     #[test]

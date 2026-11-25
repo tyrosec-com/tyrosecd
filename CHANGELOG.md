@@ -3,6 +3,16 @@
 Each version listed here corresponds exactly to the Git tag `v<version>` and to the signed binary under
 `https://get.tyrosec.com/releases/<version>/` (rebuild: [VERIFY.md](VERIFY.md)).
 
+## 0.5.14
+- Compromise check: the `FilesMan` web shell signature only matches as a whole word – Next.js bundles contain
+  `serverFilesManifest` and were reported as malicious code.
+- Web log: known scanner paths (`.env`, `phpinfo.php`, `wp-config.php.save` …) now count as probes even when the site answers with a redirect (3xx) – sites that redirect every unknown URL hid such scans.
+- Compromise check: `preg_replace` with the `/e` modifier counts as a strong web shell indicator only together with
+  request input or decoding nearby (`$_GET`, `$_POST`, `base64_decode` …); legacy code with a fixed replacement
+  (the modifier has no effect since PHP 7) is no longer reported on its own.
+- Compromise check: card-skimmer patterns inside a Nextcloud installation (minified app bundles, no checkout) are
+  reported as information only; web shell patterns there still count.
+
 ## 0.5.13
 
 - Compromise check: a WordPress core file whose checksum differs only because of CRLF/LF line-ending conversion

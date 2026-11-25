@@ -30,8 +30,12 @@ fn rules() -> &'static [Rule] {
             r("eval_decode", r"(?i)\b(?:eval|assert)\s*\(\s*(?:@\s*)?(?:base64_decode|gzinflate|gzuncompress|gzdecode|str_rot13|strrev|hex2bin|rawurldecode|convert_uudecode)\s*\(", true, false, true),
             r("exec_userinput", r"(?i)\b(?:system|shell_exec|passthru|exec|popen|proc_open|pcntl_exec|assert|eval)\s*\(\s*(?:@\s*)?\$_(?:POST|GET|REQUEST|COOKIE|SERVER)", true, false, true),
             r("varfunc_userinput", r"\$_(?:POST|GET|REQUEST|COOKIE)\s*\[[^\]]{1,40}\]\s*\(", true, false, true),
-            r("preg_e", r#"(?i)preg_replace\s*\(\s*['"].{1,200}/[a-zA-Z]*e[a-zA-Z]*['"]\s*,"#, true, false, true),
-            r("known_shell", r"(?i)FilesMan|WSO\s?(?:shell|[0-9]\.[0-9])|b374k|c99shell|r57shell|IndoXploit|alfa\s?(?:shell|team)|0byt3m1n1|p0wny|weevely", true, true, true),
+            // /e modifier alone: legacy code (removed in PHP 7, no effect there) – weak; strong only together with request
+            // input or decoding nearby (seen with an old input filter class)
+            r("preg_e", r#"(?i)preg_replace\s*\(\s*['"].{1,200}/[a-zA-Z]*e[a-zA-Z]*['"]\s*,"#, true, false, false),
+            r("preg_e_input", r#"(?is)preg_replace\s*\(\s*['"].{1,200}/[a-zA-Z]*e[a-zA-Z]*['"]\s*,.{0,300}(?:\$_(?:GET|POST|REQUEST|COOKIE|SERVER)|base64_decode|gzinflate|str_rot13)"#, true, false, true),
+            // "FilesMan" only as a whole word: Next.js bundles contain "serverFilesManifest"
+            r("known_shell", r"(?i)FilesMan\b|WSO\s?(?:shell|[0-9]\.[0-9])|b374k|c99shell|r57shell|IndoXploit|alfa\s?(?:shell|team)|0byt3m1n1|p0wny|weevely", true, true, true),
             r("create_function", r"(?i)\bcreate_function\s*\(", true, false, false),
             r("hex_escaped", r"(?i)(?:\\x[0-9a-f]{2}){24,}", true, true, false),
             r("long_base64", r"[A-Za-z0-9+/]{3000,}={0,2}", true, false, false),
@@ -96,6 +100,13 @@ fn is_strong(name: &str) -> bool {
 }
 
 const SKIP_DIRS: &[&str] = &["node_modules", ".git", "cache", ".cache"];
+
+/// Root of the Nextcloud installation containing `path` (has `version.php`, `occ` and `core/signature.json` or `apps/`)
+fn nextcloud_root(path: &str) -> Option<std::path::PathBuf> {
+    std::path::Path::new(path).ancestors().skip(1).take(12).find(|a| {
+        a.join("version.php").is_file() && a.join("occ").is_file() && (a.join("core/signature.json").is_file() || a.join("apps").is_dir())
+    }).map(|a| a.to_path_buf())
+}
 
 /// signature.json path → (relative path → SHA-512 hex)
 type NcCache = std::collections::HashMap<String, Option<std::collections::HashMap<String, String>>>;
@@ -186,6 +197,15 @@ pub fn check(ctx: &mut Ctx) {
                     ctx.add(Severity::Info, Category::Web, "web_pattern", title, Some(p),
                         Some(format!("Pattern: {} – file matches the Nextcloud signature list ({list})", hits.join(", "))));
                     continue;
+                }
+                // Nextcloud has no checkout: card-skimmer patterns in its (often minified) app bundles are noise; web shell
+                // patterns still count (seen with the @nextcloud/dialogs FilePicker bundle)
+                if hits.iter().all(|h| h.starts_with("skimmer_")) {
+                    if let Some(root) = nextcloud_root(&p) {
+                        ctx.add(Severity::Info, Category::Web, "web_pattern", title, Some(p),
+                            Some(format!("Pattern: {} – inside a Nextcloud installation ({}) without a checkout", hits.join(", "), root.display())));
+                        continue;
+                    }
                 }
                 let sev = if hits.iter().any(|h| is_strong(h)) { Severity::High } else { Severity::Medium };
                 ctx.add(sev, Category::Web, "web_pattern", title, Some(p), Some(format!("Pattern: {}", hits.join(", "))));
@@ -330,6 +350,37 @@ mod tests {
 #[cfg(test)]
 mod skimmer_tests {
     use super::*;
+
+    #[test]
+    fn preg_e_only_strong_with_input() {
+        // legacy filter class: /e with fixed replacement – no finding (single weak pattern)
+        let legacy = br#"<?php $s = preg_replace('/&#(\d+);/me', "chr(\1)", $source);"#;
+        assert!(scan_bytes(legacy, true, false).is_empty(), "legacy /e");
+        let shell = br#"<?php preg_replace('/.*/e', $_POST['c'], '');"#;
+        assert!(scan_bytes(shell, true, false).contains(&"preg_e_input"));
+    }
+
+    #[test]
+    fn filesman_needs_word_end() {
+        // Next.js runtime: "serverFilesManifest" is not the FilesMan shell
+        let next = b"const {buildManifest:a,serverFilesManifest:y,reactLoadableManifest:p}=h;";
+        assert!(!scan_bytes(next, false, true).contains(&"known_shell"), "Next.js");
+        let shell = br#"<?php $default_action = 'FilesMan'; @eval($_POST['a']);"#;
+        assert!(scan_bytes(shell, true, false).contains(&"known_shell"));
+    }
+
+    #[test]
+    fn nextcloud_root_found() {
+        let root = std::env::temp_dir().join(format!("ncroot-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("apps/viewer/js")).unwrap();
+        std::fs::write(root.join("version.php"), b"<?php").unwrap();
+        std::fs::write(root.join("occ"), b"#!").unwrap();
+        let f = root.join("apps/viewer/js/x.js");
+        std::fs::write(&f, b"x").unwrap();
+        assert_eq!(super::nextcloud_root(&f.to_string_lossy()).as_deref(), Some(root.as_path()));
+        assert!(super::nextcloud_root("/var/www/shop/js/x.js").is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn skimmer_variants() {
