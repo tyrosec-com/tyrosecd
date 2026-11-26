@@ -108,11 +108,38 @@ fn harmless_base64(hit: &str, pid: i32) -> bool {
     if !hit.to_ascii_lowercase().starts_with("base64") {
         return false;
     }
-    let parent = tyrosd_core::procinfo::ppid(pid)
-        .and_then(|pp| std::fs::read(format!("/proc/{pp}/cmdline")).ok())
-        .map(|c| String::from_utf8_lossy(&c).replace('\0', " "))
+    // parent from /proc, or from the process memory if base64 (or its shell) has already exited
+    let pp = tyrosd_core::procinfo::ppid(pid).or_else(|| tyrosd_core::proctable::get(pid, None).map(|e| e.ppid));
+    let parent = pp
+        .and_then(|pp| {
+            std::fs::read(format!("/proc/{pp}/cmdline"))
+                .ok()
+                .map(|c| String::from_utf8_lossy(&c).replace('\0', " "))
+                .or_else(|| tyrosd_core::proctable::get(pp, None).map(|e| e.cmdline))
+        })
         .unwrap_or_default();
     !base64_executed(&parent)
+}
+
+/// Process whose ancestry is checked (installer, agent): the process itself while it runs, otherwise its nearest
+/// ancestor that is still running (via the process memory) – package helpers like `tzdata.config` exit in
+/// milliseconds while dpkg/apt still run.
+fn anchor(pid: u32, gone: bool) -> i32 {
+    if !gone {
+        return pid as i32;
+    }
+    let mut cur = pid as i32;
+    for _ in 0..16 {
+        let Some(e) = tyrosd_core::proctable::get(cur, None) else { break };
+        if e.ppid <= 1 {
+            break;
+        }
+        cur = e.ppid;
+        if std::path::Path::new(&format!("/proc/{cur}")).exists() {
+            return cur;
+        }
+    }
+    pid as i32
 }
 
 /// Does the command line execute decoded base64?
@@ -138,6 +165,7 @@ pub fn on_exec(pid: u32) -> Option<Detection> {
     let p = proc::info(pid)?;
     let exe = base(&p.exe).to_string();
     let chain = proc::chain(pid, 6);
+    let anc = anchor(pid, p.gone);
     // parent chain without the process itself
     let parents: Vec<&String> = chain.iter().skip(1).collect();
     let web_parent = parents.iter().find(|c| is_web(c)).map(|s| s.to_string());
@@ -161,9 +189,9 @@ pub fn on_exec(pid: u32) -> Option<Detection> {
     if MALWARE.contains(&exe.as_str()) || MALWARE.contains(&p.comm.as_str()) {
         return Some(det("known_malware", "critical", format!("Known malware started: {}", p.comm), p.cmdline.clone(), &p, chain, p.comm.clone()));
     }
-    if let Some(why) = odd_exe(&p.exe, Some(pid as i32)) {
+    if let Some(why) = odd_exe(&p.exe, (!p.gone).then_some(pid as i32)) {
         // package management (verified program, process or ancestor) or the agent itself
-        if !trust::installer_ancestor(pid as i32, 16) && !trust::own_descendant(pid as i32, 16) {
+        if !trust::installer_ancestor(anc, 16) && !trust::own_descendant(anc, 16) {
             let web = parents.iter().any(|c| is_web(c));
             return Some(det("odd_exe", if web { "critical" } else { "high" }, format!("{why}: {}", p.comm),
                 format!("{}\nProgram: {}", p.cmdline, p.exe), &p, chain, p.exe.trim_end_matches(" (deleted)").to_string()));
@@ -172,12 +200,12 @@ pub fn on_exec(pid: u32) -> Option<Detection> {
     // 4) Attack command without web server (e.g. via SSH or cron) – medium. Deduplicated by the
     //    matched pattern: "bash -c '… | base64 -d'" starts bash *and* base64 – one report is enough.
     //    Called by package management (e.g. apt-key → base64 -d during an update): not an attack.
-    let cmd = trust::strip_appimages(&p.cmdline, Some(pid as i32));
+    let cmd = trust::strip_appimages(&p.cmdline, (!p.gone).then_some(pid as i32));
     if let Some(m) = suspicious_cmd().find(&cmd).filter(|m| !harmless_base64(m.as_str(), pid as i32) && !official_installer(&cmd)) {
         // deeper than the displayed chain: dpkg → run-parts → initramfs-tools → update-initramfs → mkinitramfs → … → ln
-        let by_installer = trust::installer_ancestor(pid as i32, 16);
+        let by_installer = trust::installer_ancestor(anc, 16);
         // Exception only for the agent's own processes (PID chain), not for every command line containing "tyrosecd"
-        if !trust::own_descendant(pid as i32, 16) && !by_installer {
+        if !trust::own_descendant(anc, 16) && !by_installer {
             let hit = m.as_str().to_lowercase();
             return Some(det("suspicious_command", "medium", format!("Suspicious command started: {}", hit.trim()),
                 p.cmdline.clone(), &p, chain, hit));
@@ -196,6 +224,7 @@ App root: {root}", p.cmdline), &p, chain, root));
 }
 
 fn det(rule: &str, sev: &str, title: String, detail: String, p: &proc::Info, chain: Vec<String>, key: String) -> Detection {
+    let detail = if p.gone { format!("{detail}\n(process had already exited – details from the agent's process memory)") } else { detail };
     Detection { rule: rule.into(), severity: sev.into(), title, detail: detail.chars().take(1000).collect(), pid: p.pid, exe: p.exe.clone(), proc_chain: chain, key }
 }
 

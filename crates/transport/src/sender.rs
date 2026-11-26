@@ -153,6 +153,9 @@ pub fn heartbeat_loop(
                 rules_count: rs.count,
                 rules_rss_kb: rs.rss_kb,
                 rules_error: rs.error.chars().take(300).collect(),
+                proc_tracking: tyrosd_core::proctable::active(),
+                proc_lost: tyrosd_core::proctable::LOST.load(Ordering::Relaxed),
+                proc_recalled: tyrosd_core::proctable::RECALLED.load(Ordering::Relaxed),
             };
             if let Ok(r) = client.post("/v1/heartbeat", &hb.encode_to_vec(), false) {
                 if let Ok(ack) = pb::HeartbeatAck::decode(r.as_slice()) {

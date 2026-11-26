@@ -323,7 +323,17 @@ impl Processor {
     }
 
     /// Returns true if an event was reported.
-    pub fn process(&self, inp: Input) -> bool {
+    pub fn process(&self, mut inp: Input) -> bool {
+        // Process unknown when the file event was read (exited, and the proc connector thread had not yet recorded
+        // its start – race in bursts of short-lived processes, ruhe test 26.11.: mkinitramfs `cp` storms): by now
+        // the process memory usually knows it
+        if let Some(p) = inp.proc.as_mut() {
+            if p.gone && p.comm.is_none() {
+                if let Some(r) = procinfo::late_recall(p.pid) {
+                    *p = r;
+                }
+            }
+        }
         if inp.op == Op::Exec {
             return self.exec(inp);
         }
@@ -784,6 +794,28 @@ mod tests {
         assert!(!has_pkg(&run(&|i| Some(proc("dpkg", i != 17)))));
         // without a process and without a package update window: no marker
         assert!(!has_pkg(&run(&|_| None)));
+    }
+
+    /// Process unknown when the file event was read, recorded by the proc connector shortly after: the event gets
+    /// name and chain from the process memory
+    #[test]
+    fn late_process_attribution_from_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let st = State::open(&dir.path().join("s.redb").to_string_lossy(), 4, 1 << 20).unwrap();
+        let evs = Arc::new(Mutex::new(Vec::new()));
+        let p = Processor::new(Arc::new(Policy::default_policy()), st, Box::new(Collect(evs.clone())), Algo::Sha256);
+        crate::proctable::set_active(true);
+        crate::proctable::insert(crate::proctable::Entry { pid: 950_002, ppid: 950_001, comm: "mkinitramfs".into(), ..Default::default() });
+        crate::proctable::insert(crate::proctable::Entry { pid: 950_003, ppid: 950_002, comm: "cp".into(), exe: "/usr/bin/cp".into(), ..Default::default() });
+        crate::proctable::on_exit(950_003);
+        let gone = ProcInfo { pid: 950_003, gone: true, ..Default::default() };
+        let f = dir.path().join("x.conf");
+        std::fs::write(&f, b"a").unwrap();
+        p.process(Input { proc: Some(gone), ..input(&f.to_string_lossy()) });
+        let evs = evs.lock().unwrap();
+        let e = evs.last().expect("event");
+        assert_eq!(e.comm.as_deref(), Some("cp"));
+        assert_eq!(e.proc_chain, vec!["cp".to_string(), "mkinitramfs".to_string()]);
     }
 
     /// Program start by verified package management carries `pkg` (trial run real-time protection)

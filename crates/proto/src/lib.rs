@@ -399,6 +399,14 @@ pub struct Heartbeat {
     pub rules_rss_kb: u64,
     #[prost(string, tag = "12")]
     pub rules_error: String,
+    /// process memory (since 0.6.0): proc connector active, kernel messages lost since start, lookups of exited
+    /// processes answered from memory since start
+    #[prost(bool, tag = "13")]
+    pub proc_tracking: bool,
+    #[prost(uint64, tag = "14")]
+    pub proc_lost: u64,
+    #[prost(uint64, tag = "15")]
+    pub proc_recalled: u64,
 }
 
 #[derive(Clone, PartialEq, prost::Message)]

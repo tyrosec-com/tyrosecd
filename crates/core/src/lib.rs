@@ -16,6 +16,7 @@ pub mod event;
 pub mod hash;
 pub mod policy;
 pub mod procinfo;
+pub mod proctable;
 pub mod processor;
 pub mod redact;
 pub mod rootfs;

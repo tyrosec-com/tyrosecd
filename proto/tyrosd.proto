@@ -75,7 +75,9 @@ message LoginEvent {
 
 message Heartbeat { uint64 last_seq = 1; uint64 spool_bytes = 2; uint64 spool_items = 3; string backend = 4; string agent_version = 5; uint64 uptime_s = 6; uint64 rss_kb = 7; repeated string actions = 8;
   // YARA rule pack (since 0.5.0): loaded version ("r1"), rules, memory after loading, last load error
-  string rules_version = 9; uint32 rules_count = 10; uint64 rules_rss_kb = 11; string rules_error = 12; }
+  string rules_version = 9; uint32 rules_count = 10; uint64 rules_rss_kb = 11; string rules_error = 12;
+  // process memory (since 0.6.0): proc connector active, kernel messages lost / exited processes recalled since start
+  bool proc_tracking = 13; uint64 proc_lost = 14; uint64 proc_recalled = 15; }
 message HeartbeatAck { uint32 interval_s = 1; string update_version = 2; string update_base = 3; bool run_check = 4; repeated Action actions = 5;
   // current YARA rule pack and base URL (get.tyrosec.com/rules/<version>) – empty: none offered
   string rules_version = 6; string rules_base = 7; }

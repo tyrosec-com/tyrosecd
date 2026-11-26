@@ -3,6 +3,19 @@
 Each version listed here corresponds exactly to the Git tag `v<version>` and to the signed binary under
 `https://get.tyrosec.com/releases/<version>/` (rebuild: [VERIFY.md](VERIFY.md)).
 
+## 0.6.0
+- Process memory: the agent now also follows process forks and exits via the proc connector and reads name, program,
+  command line and user immediately when a program starts. Exited processes stay known for 120 seconds, so file
+  events and detections of short-lived processes (e.g. a shell started by a web shell that exits within milliseconds)
+  keep their process and parent chain. Read only – no kernel extensions, no eBPF.
+- File events whose process was unknown when they were read (bursts of short-lived processes, e.g. `cp` while an
+  initramfs is built) look into the process memory again when they are processed.
+- Program starts of processes that have already exited are evaluated with the remembered values (marked in the
+  detail); package management and the agent itself are recognised via the nearest ancestor that still runs.
+- Lost kernel messages (sequence gaps, receive buffer overflow) are counted and followed by a resync of the running
+  processes; larger receive buffer. The heartbeat reports whether the process memory is active, how many kernel
+  messages were lost and how many exited processes were attributed from memory.
+
 ## 0.5.15
 - Real-time protection trial run: program starts by verified package management (e.g. `dpkg-preconfigure`
   running `tzdata.config` from /tmp during unattended upgrades) carry the package marker and are no longer

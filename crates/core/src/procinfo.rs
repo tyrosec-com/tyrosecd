@@ -71,18 +71,40 @@ fn recall_pkg(pid: i32, start_now: Option<u64>) -> Option<ProcInfo> {
     Some(i)
 }
 
+/// Exited process from the process memory: name, program and chain as reported at exec, marked as gone.
+/// Never counts as package management (that needs the verified executable while it runs).
+fn remembered(pid: i32) -> Option<ProcInfo> {
+    let e = crate::proctable::recall(pid)?;
+    let chain = crate::proctable::chain(pid, 8);
+    Some(ProcInfo { pid, exe: (!e.exe.is_empty()).then_some(e.exe), comm: Some(e.comm), chain, gone: true, pkg: false })
+}
+
+/// Second look into the process memory for a process that was unknown at read time (see `Processor::process`)
+pub fn late_recall(pid: i32) -> Option<ProcInfo> {
+    if pid <= 0 || !crate::proctable::active() {
+        return None;
+    }
+    remembered(pid)
+}
+
 pub fn lookup(pid: i32) -> ProcInfo {
     let start = start_time(pid);
     let mut info = ProcInfo { pid, ..Default::default() };
     info.comm = comm(pid);
     info.exe = exe(pid);
     if info.comm.is_none() {
-        // already exited: recently verified as package management?
-        return recall_pkg(pid, None).unwrap_or(ProcInfo { gone: true, ..info });
+        // already exited: recently verified as package management? Otherwise the process memory (proc connector)
+        return recall_pkg(pid, None).or_else(|| remembered(pid)).unwrap_or(ProcInfo { gone: true, ..info });
     }
     let mut cur = pid;
     for _ in 0..8 {
         match comm(cur) {
+            None if cur != pid => {
+                // parent already exited (e.g. the shell a web shell started): rest of the chain from memory
+                let rest = crate::proctable::chain(cur, 8 - info.chain.len().min(8));
+                info.chain.extend(rest);
+                break;
+            }
             Some(c) => {
                 // expensive check (exe, owner) only for names from the list
                 if !info.pkg && crate::trust::PACKAGE_MANAGERS.contains(&c.as_str()) && crate::trust::verified_program(cur, &c) {
@@ -105,7 +127,7 @@ pub fn lookup(pid: i32) -> ProcInfo {
     // (then the package update window applies), otherwise an incompletely read dpkg would be known as unverified
     let now = start_time(pid);
     if now.is_none() || now != start {
-        return recall_pkg(pid, None).unwrap_or(ProcInfo { gone: true, ..info });
+        return recall_pkg(pid, None).or_else(|| remembered(pid)).unwrap_or(ProcInfo { gone: true, ..info });
     }
     // still running, not verified – maybe verified just before (e.g. chain briefly unreadable)
     recall_pkg(pid, start).unwrap_or(info)
