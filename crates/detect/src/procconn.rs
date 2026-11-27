@@ -15,14 +15,16 @@ const CN_VAL_PROC: u32 = 1;
 const PROC_CN_MCAST_LISTEN: u32 = 1;
 const PROC_EVENT_FORK: u32 = 0x0000_0001;
 const PROC_EVENT_EXEC: u32 = 0x0000_0002;
+const PROC_EVENT_UID: u32 = 0x0000_0004;
 const PROC_EVENT_EXIT: u32 = 0x8000_0000;
 const NLMSG_DONE: u16 = 3;
 /// Receive buffer (SO_RCVBUFFORCE, needs CAP_NET_ADMIN): fork storms of builds/cron otherwise overflow the default
 const RCVBUF: i32 = 4 << 20;
 
 /// Listens for process events, keeps the process memory up to date and calls `on_exec(pid)` for every process
-/// start until `stop` is set.
-pub fn listen(stop: &AtomicBool, mut on_exec: impl FnMut(u32)) -> std::io::Result<()> {
+/// start and `on_uid(pid, previous (real, effective) uid, new effective uid)` for every change of the user
+/// (setuid & co.) until `stop` is set.
+pub fn listen(stop: &AtomicBool, mut on_exec: impl FnMut(u32), mut on_uid: impl FnMut(u32, Option<(Option<u32>, Option<u32>)>, u32)) -> std::io::Result<()> {
     // SAFETY: simple system calls with checked return values
     unsafe {
         let fd = libc::socket(libc::AF_NETLINK, libc::SOCK_DGRAM | libc::SOCK_CLOEXEC, NETLINK_CONNECTOR);
@@ -86,6 +88,10 @@ pub fn listen(stop: &AtomicBool, mut on_exec: impl FnMut(u32)) -> std::io::Resul
                     on_exec(pid);
                 }
                 Ev::Exit(pid) => proctable::on_exit(pid),
+                Ev::Uid { pid, ruid, euid } => {
+                    let prev = proctable::on_uid(pid, ruid, euid);
+                    on_uid(pid as u32, prev, euid);
+                }
                 Ev::Seq { cpu, seq } => lost += seqs.gap(cpu, seq),
             });
             if lost > 0 {
@@ -105,6 +111,8 @@ pub enum Ev {
     Fork { parent: i32, child: i32 },
     Exec(u32),
     Exit(i32),
+    /// change of the effective user (setuid, setreuid, setresuid …) of a process
+    Uid { pid: i32, ruid: u32, euid: u32 },
     /// sequence number of the message (counted per CPU by the kernel) – gaps mean lost messages
     Seq { cpu: u32, seq: u32 },
 }
@@ -149,6 +157,13 @@ pub fn parse(mut b: &[u8], on: &mut impl FnMut(Ev)) {
                     let (ptgid, cpid, ctgid) = (i32_at(m, 56), i32_at(m, 60), i32_at(m, 64));
                     if ctgid > 0 && cpid == ctgid {
                         on(Ev::Fork { parent: ptgid, child: ctgid });
+                    }
+                }
+                // id_proc_event: process_pid @52, process_tgid @56, ruid @60, euid @64
+                PROC_EVENT_UID if m.len() >= 68 => {
+                    let tgid = i32_at(m, 56);
+                    if tgid > 0 {
+                        on(Ev::Uid { pid: tgid, ruid: u32_at(m, 60), euid: u32_at(m, 64) });
                     }
                 }
                 PROC_EVENT_EXIT => {
@@ -200,10 +215,11 @@ mod tests {
         b.extend(msg(PROC_EVENT_FORK, 0, 3, &[100, 100, 4244, 4243])); // thread: ignored
         b.extend(msg(PROC_EVENT_EXEC, 0, 4, &[4245, 4243])); // exec in a thread: ignored
         b.extend(msg(PROC_EVENT_EXIT, 1, 7, &[4243, 4243, 0, 17]));
+        b.extend(msg(PROC_EVENT_UID, 1, 8, &[4250, 4250, 33, 0]));
         let mut got = vec![];
         parse(&b, &mut |e| got.push(e));
         let ev: Vec<_> = got.into_iter().filter(|e| !matches!(e, Ev::Seq { .. })).collect();
-        assert_eq!(ev, vec![Ev::Exec(4242), Ev::Fork { parent: 100, child: 4243 }, Ev::Exit(4243)]);
+        assert_eq!(ev, vec![Ev::Exec(4242), Ev::Fork { parent: 100, child: 4243 }, Ev::Exit(4243), Ev::Uid { pid: 4250, ruid: 33, euid: 0 }]);
     }
 
     #[test]

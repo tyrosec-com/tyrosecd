@@ -4,7 +4,9 @@
 //! Diagnostics: watch (local, without central server) | scan | diff-test
 
 mod actions;
+mod credaccess;
 mod decoy;
+mod harden;
 mod monitor;
 mod yara_rules;
 
@@ -448,7 +450,7 @@ fn main() -> Result<()> {
         Cmd::Actions { action, config } => {
             let mut cfg = AgentConfig::load(&config)?;
             let pick = |k: Vec<String>| -> Result<Vec<String>> {
-                let k = if k.is_empty() { actions::KINDS.iter().map(|s| s.to_string()).collect() } else { k };
+                let k = if k.is_empty() { actions::DEFAULT_KINDS.iter().map(|s| s.to_string()).collect() } else { k };
                 if let Some(bad) = k.iter().find(|x| !actions::KINDS.contains(&x.as_str())) {
                     bail!("unknown action {bad} (allowed: {})", actions::KINDS.join(", "));
                 }
@@ -486,7 +488,8 @@ fn main() -> Result<()> {
                     dropin(&cfg, true)?;
                 }
                 ActionsCmd::Disable { kinds } => {
-                    let k = pick(kinds)?;
+                    // "disable" without a list switches off everything, including hardening
+                    let k = if kinds.is_empty() { actions::KINDS.iter().map(|s| s.to_string()).collect() } else { pick(kinds)? };
                     cfg.actions.retain(|a| !k.contains(a));
                     cfg.save(&config)?;
                     dropin(&cfg, true)?;
@@ -981,6 +984,31 @@ fn run_agent(config: &str) -> Result<()> {
         match r {
             Ok(()) => log(format!("Decoys: {} active", decoy::load(&cfg.data_dir).len())),
             Err(e) => log(format!("Decoy watch not available: {e}")),
+        }
+    }
+    // E8: credential files (/etc/shadow, private SSH keys) read by a program that never did before (learned profile)
+    {
+        let sp = spool.clone();
+        let r = credaccess::start(&cfg.data_dir, move |path, p| {
+            let comm = p.comm.clone().unwrap_or_default();
+            let exe = p.exe.clone().unwrap_or_default();
+            let web = p.chain.iter().skip(1).any(|c| c.starts_with("php") || matches!(c.as_str(), "apache2" | "httpd" | "nginx" | "lsphp" | "frankenphp"));
+            let what = if credaccess::class(&path) == "shadow" { "Password database" } else { "Private SSH key" };
+            let d = pb::Detection {
+                rule: "credential_access".into(),
+                severity: if web { "critical" } else { "high" }.into(),
+                title: format!("{what} read by {comm}"),
+                detail: format!("{path}\nProgram: {exe}\nProcess chain: {}\nThis program has never read this kind of file on this server before – attackers search for password hashes and SSH keys to move on to other servers", p.chain.join(" ← ")),
+                pid: p.pid.max(0) as u32,
+                exe: exe.clone(),
+                proc_chain: p.chain.clone(),
+                key: format!("{path}|{exe}"),
+            };
+            let _ = sp.push(tyrosd_core::now_ns(), pb::envelope::Body::Detection(d));
+        });
+        match r {
+            Ok(n) => log(format!("Credential files: {n} watched")),
+            Err(e) => log(format!("Credential file watch not available: {e}")),
         }
     }
     // Access logs (nginx/Apache): webshell requests, sensitive files, WordPress logins

@@ -5,7 +5,9 @@
 pub mod app;
 pub mod apphard;
 pub mod composer;
+pub mod docker;
 pub mod gitindex;
+pub mod harden;
 pub mod pkg;
 pub mod persistence;
 pub mod plugins;

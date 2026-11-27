@@ -22,6 +22,15 @@ fn agent() -> &'static ureq::Agent {
     })
 }
 
+/// HTTP status of a GET request (redirects followed), None = not reachable – for the check after a hardening
+pub fn status_of(url: &str) -> Option<u16> {
+    match agent().get(url).call() {
+        Ok(r) => Some(r.status()),
+        Err(ureq::Error::Status(c, _)) => Some(c),
+        Err(_) => None,
+    }
+}
+
 /// GET → JSON. `Ok(None)` on 404.
 fn get_json(url: &str) -> Result<Option<Value>, String> {
     match agent().get(url).call() {

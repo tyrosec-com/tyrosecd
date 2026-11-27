@@ -16,6 +16,7 @@ pub mod dns;
 pub mod net;
 pub mod proc;
 pub mod procconn;
+pub mod system;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -33,6 +34,8 @@ const NET_TOOLS: &[&str] = &["nc", "ncat", "netcat", "nc.traditional", "nc.openb
 const SHELLS: &[&str] = &["sh", "bash", "dash", "zsh", "ksh", "ash", "busybox", "python", "python2", "python3", "perl", "ruby", "php", "lua", "node", "nc", "ncat", "socat"];
 /// Mail servers that are allowed to speak SMTP to the outside
 const MTA: &[&str] = &["master", "smtp", "postfix", "exim", "exim4", "sendmail", "opensmtpd", "smtpd", "msmtp", "ssmtp", "nullmailer-send", "dma", "postdrop"];
+/// Tunnel and remote-access tools that attackers use for persistent access (GSocket campaign 2026, chisel, frp …)
+const TUNNEL: &[&str] = &["gs-netcat", "gsocket", "gs-sftp", "gs-mount", "chisel", "frpc", "frps", "ngrok", "rathole", "cloudflared", "bore"];
 /// known miner/malware program names
 const MALWARE: &[&str] = &["xmrig", "kinsing", "kdevtmpfsi", "minerd", "cpuminer", "xmr-stak", "t-rex", "nbminer", "lolminer", "sysupdate", "networkservice", "kthreaddi", "dbused"];
 /// Package management/installers: checked via the program file (`trust::installer_ancestor`), not via the name
@@ -47,6 +50,9 @@ pub fn odd_exe(exe: &str, pid: Option<i32>) -> Option<&'static str> {
     // owned by root or by the process's user
     if trust::appimage_for(exe, pid) {
         return None;
+    }
+    if exe.starts_with("/memfd:") {
+        return Some("Program runs only from memory (memfd) – there is no file on disk");
     }
     if let Some(orig) = exe.strip_suffix(" (deleted)") {
         // replaced by an update (file is back, service just not restarted) → no suspicion.
@@ -160,12 +166,143 @@ fn is_web(name: &str) -> bool {
     WEB.iter().any(|w| name == *w || name.starts_with(&format!("{w}-")) || (name.starts_with("php") && w == &"php"))
 }
 
+/// Root-owned SUID program (sudo, su, passwd, mount, pkexec, chrome-sandbox …): the regular way to become root.
+/// Creating one needs root already (reported as new_suid), so its use is no escalation by itself.
+fn suid_root(exe: &str) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    !exe.ends_with(" (deleted)") && !exe.starts_with("/memfd:") && std::fs::metadata(exe).is_ok_and(|m| m.uid() == 0 && m.mode() & 0o4000 != 0)
+}
+
+/// Real and effective user of a process: process memory first (also for exited processes), else /proc
+fn ids(pid: i32) -> (Option<u32>, Option<u32>) {
+    match tyrosd_core::proctable::get(pid, None) {
+        Some(e) if e.euid.is_some() => (e.uid, e.euid),
+        _ => {
+            let e = tyrosd_core::proctable::read(pid);
+            (e.as_ref().and_then(|e| e.uid), e.and_then(|e| e.euid))
+        }
+    }
+}
+
+/// was a normal user (real and effective) and is root (effective) now – a root daemon that only lent its effective
+/// user (seteuid) and takes root back keeps its real uid 0 and does not count
+fn gained_root(prev: (Option<u32>, Option<u32>), euid: u32) -> bool {
+    euid == 0 && matches!(prev.0, Some(r) if r != 0) && matches!(prev.1, Some(e) if e != 0)
+}
+
+/// E1 – privilege escalation: a process that ran as a normal user becomes root (effective) without a regular SUID
+/// program. Covers both the kernel's UID change report (setuid & co. after an exploit) and the start of a root
+/// program by a non-root parent (exploit → root shell). Package management and the agent itself are exempt.
+pub fn escalation(pid: u32, prev: (Option<u32>, Option<u32>), euid: u32) -> Option<Detection> {
+    if !gained_root(prev, euid) {
+        return None;
+    }
+    let prev_euid = prev.1;
+    let p = proc::info(pid)?;
+    if suid_root(&p.exe) {
+        return None;
+    }
+    let anc = anchor(pid, p.gone);
+    if trust::installer_ancestor(anc, 16) || trust::own_descendant(anc, 16) {
+        return None;
+    }
+    let chain = proc::chain(pid, 8);
+    let web = chain.iter().skip(1).any(|c| is_web(c));
+    let odd = odd_exe(&p.exe, (!p.gone).then_some(pid as i32));
+    let was = prev_euid.unwrap_or_default();
+    Some(det(
+        "privilege_escalation",
+        if web || odd.is_some() { "critical" } else { "high" },
+        format!("Process became root without sudo/su: {}", p.comm),
+        format!(
+            "{}\nProgram: {}\nUser changed from uid {was} to root without a regular SUID program (sudo, su …) – typical of a successful privilege escalation exploit{}",
+            p.cmdline,
+            p.exe,
+            odd.map(|w| format!("\n{w}")).unwrap_or_default()
+        ),
+        &p,
+        chain,
+        format!("{}|{was}", p.exe),
+    ))
+}
+
+/// E2 – tunnel/remote-access tool (name, typical command line or GSocket environment)
+fn tunnel_tool(p: &proc::Info) -> Option<String> {
+    let exe = base(&p.exe);
+    let c = p.cmdline.to_ascii_lowercase();
+    for t in TUNNEL {
+        if exe == *t || p.comm == *t {
+            // cloudflared/bore also exist for other purposes – only their tunnel mode counts
+            if (*t == "cloudflared" && !c.contains("tunnel")) || (*t == "bore" && !c.contains(" local")) {
+                continue;
+            }
+            return Some((*t).to_string());
+        }
+    }
+    if (exe == "socat" || p.comm == "socat") && c.contains("tcp-listen") && (c.contains("exec:") || c.contains("system:")) {
+        return Some("socat listener with program".into());
+    }
+    if !p.gone {
+        if let Ok(env) = std::fs::read(format!("/proc/{}/environ", p.pid)) {
+            if env.split(|b| *b == 0).any(|v| v.starts_with(b"GSOCKET_ARGS=") || v.starts_with(b"GS_ARGS=")) {
+                return Some("GSocket (environment)".into());
+            }
+        }
+    }
+    None
+}
+
+/// E2 – a normal program that names itself like a kernel thread („[kworker/0:1]“); real kernel threads have no program file
+fn disguised_kthread(p: &proc::Info) -> bool {
+    let c = p.cmdline.trim();
+    c.starts_with('[') && c.ends_with(']') && !p.exe.is_empty()
+}
+
+fn tunnel_or_disguise(pid: u32, p: &proc::Info, chain: &[String]) -> Option<Detection> {
+    let web = chain.iter().skip(1).any(|c| is_web(c));
+    if disguised_kthread(p) {
+        return Some(det(
+            "disguised_kthread",
+            "critical",
+            format!("Program disguised as kernel thread: {}", p.cmdline.trim()),
+            format!("Name: {}\nProgram: {}\nA normal program poses as a kernel thread – typical of malware and remote-access tools", p.cmdline.trim(), p.exe),
+            p,
+            chain.to_vec(),
+            p.exe.clone(),
+        ));
+    }
+    let t = tunnel_tool(p)?;
+    let odd = odd_exe(&p.exe, (!p.gone).then_some(pid as i32)).is_some();
+    Some(det(
+        "tunnel_tool",
+        if web || odd { "critical" } else { "high" },
+        format!("Tunnel/remote-access tool started: {t}"),
+        format!(
+            "{}\nProgram: {}\nTools like this keep remote access open past firewalls – legitimate for admins, but also used by attackers (e.g. GSocket campaign 2026). If you use it on purpose, mark it as known.",
+            p.cmdline, p.exe
+        ),
+        p,
+        chain.to_vec(),
+        format!("{t}|{}", p.exe),
+    ))
+}
+
 /// Evaluates a newly started process.
 pub fn on_exec(pid: u32) -> Option<Detection> {
     let p = proc::info(pid)?;
     let exe = base(&p.exe).to_string();
     let chain = proc::chain(pid, 6);
     let anc = anchor(pid, p.gone);
+    // E1: root program started by a parent that ran as a normal user (exploit → root shell)
+    if ids(pid as i32).1 == Some(0) {
+        if let Some(d) = escalation(pid, ids(p.ppid as i32), 0) {
+            return Some(d);
+        }
+    }
+    // E2: tunnel tools, programs disguised as kernel threads
+    if let Some(d) = tunnel_or_disguise(pid, &p, &chain) {
+        return Some(d);
+    }
     // parent chain without the process itself
     let parents: Vec<&String> = chain.iter().skip(1).collect();
     let web_parent = parents.iter().find(|c| is_web(c)).map(|s| s.to_string());
@@ -226,6 +363,51 @@ App root: {root}", p.cmdline), &p, chain, root));
 fn det(rule: &str, sev: &str, title: String, detail: String, p: &proc::Info, chain: Vec<String>, key: String) -> Detection {
     let detail = if p.gone { format!("{detail}\n(process had already exited – details from the agent's process memory)") } else { detail };
     Detection { rule: rule.into(), severity: sev.into(), title, detail: detail.chars().take(1000).collect(), pid: p.pid, exe: p.exe.clone(), proc_chain: chain, key }
+}
+
+#[cfg(test)]
+mod paket_a_tests {
+    use super::*;
+
+    fn info(comm: &str, exe: &str, cmdline: &str) -> proc::Info {
+        proc::Info { pid: 999_999, ppid: 1, comm: comm.into(), exe: exe.into(), cmdline: cmdline.into(), gone: true }
+    }
+
+    #[test]
+    fn escalation_only_from_normal_user_without_suid() {
+        // normal user → root
+        assert!(gained_root((Some(1000), Some(1000)), 0));
+        assert!(gained_root((Some(33), Some(33)), 0), "web user");
+        // root daemon regaining root after seteuid, still a user, unknown history: no
+        assert!(!gained_root((Some(0), Some(1000)), 0));
+        assert!(!gained_root((Some(1000), Some(1000)), 33));
+        assert!(!gained_root((None, None), 0));
+        // the agent's own processes are never reported
+        assert!(escalation(std::process::id(), (Some(1000), Some(1000)), 0).is_none());
+        // regular SUID program is not an escalation
+        assert!(!suid_root("/bin/sh"));
+        assert!(!suid_root("/memfd:x (deleted)"));
+    }
+
+    #[test]
+    fn tunnel_tools_and_disguise() {
+        assert_eq!(tunnel_tool(&info("gs-netcat", "/usr/bin/gs-netcat", "gs-netcat -s secret -l -i")).as_deref(), Some("gs-netcat"));
+        assert_eq!(tunnel_tool(&info("chisel", "/tmp/chisel", "chisel client 203.0.113.9:443 R:socks")).as_deref(), Some("chisel"));
+        assert!(tunnel_tool(&info("cloudflared", "/usr/bin/cloudflared", "cloudflared tunnel run")).is_some());
+        assert!(tunnel_tool(&info("cloudflared", "/usr/bin/cloudflared", "cloudflared proxy-dns")).is_none(), "DNS proxy is no tunnel");
+        assert!(tunnel_tool(&info("socat", "/usr/bin/socat", "socat TCP-LISTEN:4444,fork EXEC:/bin/sh")).is_some());
+        assert!(tunnel_tool(&info("socat", "/usr/bin/socat", "socat UNIX-LISTEN:/run/x.sock TCP:127.0.0.1:80")).is_none());
+        assert!(tunnel_tool(&info("bash", "/usr/bin/bash", "bash -c ls")).is_none());
+        assert!(disguised_kthread(&info("kworker", "/tmp/.x/k", "[kworker/0:1]")));
+        assert!(!disguised_kthread(&info("kworker/0:1", "", "")), "real kernel thread has no program file");
+        let d = tunnel_or_disguise(1, &info("ngrok", "/tmp/ngrok", "ngrok tcp 22"), &["ngrok".into(), "php-fpm8.3".into()]).unwrap();
+        assert_eq!((d.rule.as_str(), d.severity.as_str()), ("tunnel_tool", "critical"));
+    }
+
+    #[test]
+    fn memfd_is_named_clearly() {
+        assert!(odd_exe("/memfd:payload (deleted)", None).unwrap().contains("memory"));
+    }
 }
 
 #[cfg(test)]
@@ -307,6 +489,9 @@ pub fn sweep(seen: &mut HashSet<String>) -> Vec<Detection> {
     }
     for (pid, cs) in by_pid {
         let Some(p) = proc::info(pid) else { continue };
+        if let Some(d) = tunnel_or_disguise(pid, &p, &proc::chain(pid, 6)) {
+            push(&mut out, seen, d);
+        }
         let exe = base(&p.exe).to_string();
         for c in &cs {
             if c.remote_is_local() {
@@ -362,17 +547,31 @@ pub fn run(stop: &'static AtomicBool, emit: impl Fn(Detection) + Send + Sync + '
         std::thread::Builder::new()
             .name("detect-exec".into())
             .spawn(move || {
-                let mut recent: HashMap<String, Instant> = HashMap::new();
-                let r = procconn::listen(stop, |pid| {
-                    if let Some(d) = on_exec(pid) {
-                        // the same detection at most every 10 min
-                        let k = format!("{}|{}", d.rule, d.key);
-                        if recent.get(&k).map(|t| t.elapsed() > Duration::from_secs(600)).unwrap_or(true) {
-                            recent.insert(k, Instant::now());
-                            emit(d);
-                        }
+                let recent: HashMap<String, Instant> = HashMap::new();
+                // the same detection at most every 10 min (shared by process starts and user changes)
+                let recent = std::cell::RefCell::new(recent);
+                let once = |d: Detection| {
+                    let k = format!("{}|{}", d.rule, d.key);
+                    let mut r = recent.borrow_mut();
+                    if r.get(&k).map(|t| t.elapsed() > Duration::from_secs(600)).unwrap_or(true) {
+                        r.insert(k, Instant::now());
+                        emit(d);
                     }
-                });
+                };
+                let r = procconn::listen(
+                    stop,
+                    |pid| {
+                        if let Some(d) = on_exec(pid) {
+                            once(d);
+                        }
+                    },
+                    // E1: process becomes root through setuid & co. (kernel report)
+                    |pid, prev, euid| {
+                        if let Some(d) = prev.and_then(|p| escalation(pid, p, euid)) {
+                            once(d);
+                        }
+                    },
+                );
                 if let Err(e) = r {
                     eprintln!("[tyrosecd] process starts not available ({e}) – periodic check only");
                 }
@@ -384,10 +583,22 @@ pub fn run(stop: &'static AtomicBool, emit: impl Fn(Detection) + Send + Sync + '
         .spawn(move || {
             let mut seen = HashSet::new();
             let mut last_reset = Instant::now();
+            // Package B: log tampering, hidden processes, kernel modules – every 30 s
+            let mut watch = system::Watch::default();
+            let mut round = 0u32;
             while !stop.load(Ordering::Relaxed) {
                 for d in sweep(&mut seen) {
                     emit(d);
                 }
+                if round % 6 == 0 {
+                    let cand = if tyrosd_core::proctable::active() { tyrosd_core::proctable::running(Duration::from_secs(10)) } else { vec![] };
+                    for (rule, sev, title, detail, key) in watch.round(&cand) {
+                        if seen.insert(format!("{rule}|{key}")) {
+                            emit(Detection { rule: rule.into(), severity: sev.into(), title, detail, pid: 0, exe: String::new(), proc_chain: vec![], key });
+                        }
+                    }
+                }
+                round = round.wrapping_add(1);
                 if last_reset.elapsed() > Duration::from_secs(6 * 3600) {
                     seen.clear(); // report persisting findings again every 6 h
                     last_reset = Instant::now();

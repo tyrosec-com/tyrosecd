@@ -3,6 +3,49 @@
 Each version listed here corresponds exactly to the Git tag `v<version>` and to the signed binary under
 `https://get.tyrosec.com/releases/<version>/` (rebuild: [VERIFY.md](VERIFY.md)).
 
+## 0.7.0
+- Privilege escalation: a process that ran as a normal user (e.g. the web server user) and becomes root without a
+  regular SUID program (sudo, su …) is reported – both from the kernel's user change report (setuid & co.) and when
+  a non-root process starts a root program (exploit → root shell). Package management and the agent are exempt.
+- Tunnel and remote-access tools (GSocket/gs-netcat, chisel, frp, ngrok, cloudflared tunnel, rathole, socat
+  listeners with a program) and programs that disguise themselves as kernel threads are reported – at start and,
+  for running processes with connections, in the periodic sweep.
+- Programs running only from memory (memfd) are named as such.
+- Web log: a POST to `wp-login.php` answered with a redirect that carries a rendered page (more than 512 bytes) is never
+  counted as a successful WordPress login – sites without WordPress that redirect every unknown address were
+  reported as successful logins right after an agent restart.
+- Traces and hiding (checked every 30 seconds, read only):
+  - security logs (auth.log, secure, syslog, messages, wtmp, btmp, lastlog, faillog, audit.log) that are deleted,
+    emptied, shortened or replaced by a smaller file without a log rotation (a new or renewed rotated sibling such
+    as `auth.log.1` counts as rotation);
+  - processes hidden by a mount over `/proc/<pid>`, and processes the kernel reported that still exist but are
+    missing from the `/proc` listing (userland rootkits) – confirmed in two rounds;
+  - kernel taint flags for out-of-tree or unsigned modules newly set, and loaded kernel modules that are not part of
+    the running kernel's module tree (also those loaded before the agent started; skipped if the tree is missing).
+- Web log: risky backend actions are reported – new users/admin access (WordPress incl. REST API, Shopware Admin
+  API, Magento admin users and integrations, Nextcloud users/groups), code uploaded or edited (plugin/theme ZIP,
+  built-in file editor, Shopware extension upload), extensions/apps enabled, and saved Magento design configuration
+  (HTML head/footer, a typical spot for card skimmers). Recognised from method, path and status only – no request
+  bodies. Rated critical when the same IP had five or more failed logins in the hour before.
+- Credential files: reading `/etc/shadow`, `/etc/gshadow` or private SSH keys (`~/.ssh/id_*` of root and the users
+  in `/home`) by a program that never did so on this server is reported once. Plain open notifications (never a
+  permission request – logins never wait for the agent); login, sudo, cron, SSH tools, backups and verified package
+  management are exempt; the programs seen during the first 7 days are learned silently.
+- Compromise check: running Docker containers that are privileged (or have SYS_ADMIN/SYS_MODULE/ALL), that have the
+  Docker socket mounted, or that have a host system folder (/, /etc, /root, /boot, /usr) mounted writable – read
+  from the container configuration only.
+- Compromise check, hardening findings with a ready-made snippet (read only, nothing is changed): WordPress file
+  editor enabled (`DISALLOW_FILE_EDIT`), PHP execution not blocked in `wp-content/uploads` (Apache `.htaccess` or
+  nginx/Apache rule), Magento admin at `/admin`, Laravel `.env` inside the public folder, Nextcloud `config.php`
+  readable by all users, and for the web PHP (FPM/Apache module): `display_errors`, `expose_php` and functions that
+  start programs.
+- Optional hardening on request (action kind `harden`, never enabled by default and **not** part of
+  `tyrosecd actions enable` without a list – it must be named: `sudo tyrosecd actions enable harden`): fixed recipes
+  only (`wp_disallow_file_edit` adds one line to `wp-config.php`, `wp_uploads_noexec` adds a marked block to
+  `wp-content/uploads/.htaccess`), inside the web roots only. The agent builds the change itself, backs up the
+  original, writes via descriptors, then checks (`php -l`, home page, an uploaded image) and restores the original
+  immediately if a check fails or no check is possible. Undo restores the backup if the file was not changed since.
+
 ## 0.6.0
 - Process memory: the agent now also follows process forks and exits via the proc connector and reads name, program,
   command line and user immediately when a program starts. Exited processes stay known for 120 seconds, so file

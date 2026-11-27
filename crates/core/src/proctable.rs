@@ -29,6 +29,8 @@ pub struct Entry {
     pub exe: String,
     pub cmdline: String,
     pub uid: Option<u32>,
+    /// effective user (status `Uid:` field 2) – root via SUID or a successful exploit
+    pub euid: Option<u32>,
     /// set on exit
     pub exited: Option<Instant>,
 }
@@ -98,6 +100,24 @@ pub fn on_fork(parent: i32, child: i32) {
     });
 }
 
+/// UID change reported by the kernel (setuid & co.): new real and effective user; returns the previous ones
+/// (real, effective) if the process is known
+pub fn on_uid(pid: i32, ruid: u32, euid: u32) -> Option<(Option<u32>, Option<u32>)> {
+    with(|t| {
+        let (e, _) = t.map.get_mut(&pid)?;
+        let prev = (e.uid, e.euid);
+        e.uid = Some(ruid);
+        e.euid = Some(euid);
+        Some(prev)
+    })
+}
+
+/// effective user of a running process
+pub fn euid(pid: i32) -> Option<u32> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    s.lines().find(|l| l.starts_with("Uid:"))?.split_whitespace().nth(2)?.parse().ok()
+}
+
 /// exec: read the cheap values right now (the process may be gone in a few milliseconds)
 pub fn on_exec(pid: i32) -> Entry {
     let e = read(pid).unwrap_or_else(|| {
@@ -164,6 +184,12 @@ pub fn chain(pid: i32, depth: usize) -> Vec<String> {
     })
 }
 
+/// Processes the kernel reported as running (no exit seen) for at least `min_age` – candidates for the cross-check
+/// against the /proc listing (hidden processes)
+pub fn running(min_age: Duration) -> Vec<i32> {
+    with(|t| t.map.iter().filter(|(_, (e, at))| e.exited.is_none() && at.elapsed() >= min_age).map(|(p, _)| *p).collect())
+}
+
 pub fn len() -> usize {
     with(|t| t.map.len())
 }
@@ -183,10 +209,11 @@ pub fn read(pid: i32) -> Option<Entry> {
             b.split(|c| *c == 0).filter(|s| !s.is_empty()).map(|s| String::from_utf8_lossy(s).into_owned()).collect::<Vec<_>>().join(" ")
         })
         .unwrap_or_default();
-    let uid = std::fs::read_to_string(format!("/proc/{pid}/status"))
+    let ids: Vec<u32> = std::fs::read_to_string(format!("/proc/{pid}/status"))
         .ok()
-        .and_then(|s| s.lines().find(|l| l.starts_with("Uid:")).and_then(|l| l.split_whitespace().nth(1)?.parse().ok()));
-    Some(Entry { pid, ppid, start, comm, exe, cmdline: cmdline.chars().take(MAX_CMDLINE).collect(), uid, exited: None })
+        .and_then(|s| s.lines().find(|l| l.starts_with("Uid:")).map(|l| l.split_whitespace().skip(1).filter_map(|x| x.parse().ok()).collect()))
+        .unwrap_or_default();
+    Some(Entry { pid, ppid, start, comm, exe, cmdline: cmdline.chars().take(MAX_CMDLINE).collect(), uid: ids.first().copied(), euid: ids.get(1).copied(), exited: None })
 }
 
 /// After lost kernel messages: take up all running processes that are not yet known (at most every 30 s)
@@ -220,7 +247,7 @@ mod tests {
 
     // tests share the global table: unique PID ranges per test
     fn e(pid: i32, ppid: i32, comm: &str, start: Option<u64>) -> Entry {
-        Entry { pid, ppid, start, comm: comm.into(), exe: format!("/usr/bin/{comm}"), cmdline: comm.into(), uid: Some(33), exited: None }
+        Entry { pid, ppid, start, comm: comm.into(), exe: format!("/usr/bin/{comm}"), cmdline: comm.into(), uid: Some(33), euid: Some(33), exited: None }
     }
 
     #[test]
@@ -248,6 +275,15 @@ mod tests {
         insert(e(920_000, 1, "cron", Some(1)));
         on_fork(920_000, 920_001);
         assert_eq!(get(920_001, None).unwrap().comm, "cron");
+    }
+
+    #[test]
+    fn uid_change_returns_previous_effective_user() {
+        insert(e(960_001, 1, "php-fpm8.3", None));
+        assert_eq!(on_uid(960_001, 0, 0), Some((Some(33), Some(33))));
+        assert_eq!(get(960_001, None).unwrap().euid, Some(0));
+        assert_eq!(get(960_001, None).unwrap().uid, Some(0));
+        assert_eq!(on_uid(960_999, 0, 0), None, "unknown process");
     }
 
     #[test]
@@ -282,6 +318,7 @@ mod tests {
     #[test]
     fn reads_own_process() {
         let me = read(std::process::id() as i32).unwrap();
-        assert!(!me.comm.is_empty() && me.start.is_some() && me.uid.is_some());
+        assert!(!me.comm.is_empty() && me.start.is_some() && me.uid.is_some() && me.euid.is_some());
+        assert_eq!(euid(std::process::id() as i32), me.euid);
     }
 }

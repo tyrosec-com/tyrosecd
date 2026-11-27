@@ -6,6 +6,8 @@
 //! - **POST to PHP in upload directories**
 //! - **Sensitive file served** (200 on `.env`, `.git/`, database dumps, backups, phpinfo …)
 //! - **WordPress logins**: failed attempts aggregated per IP, success individually → "brute force → login" chain on server
+//! - **Risky backend actions** (package C): new admin users, uploaded/edited code, enabled extensions in WordPress,
+//!   Shopware 6, Magento 2 and Nextcloud – from the request line only (no request bodies, no database access)
 //!
 //! Formats: combined / common, optionally with a leading `vhost:port` (vhost_combined).
 use std::collections::HashMap;
@@ -238,6 +240,8 @@ pub struct Analyzer {
     /// Sizes of 302 responses to requests other than the login, per website/log ("redirects everything", e.g. plugins
     /// that hide wp-login.php – real case: a website answers everything with 302 → /)
     redirects: HashMap<String, Vec<u64>>,
+    /// failed logins per IP (count, since) – a backend action right after a brute-force wave is rated higher
+    fails: HashMap<String, (u32, Instant)>,
 }
 
 /// Does Apache load mod_status / mod_info? Without an Apache configuration (e.g. nginx only) neither page exists.
@@ -266,6 +270,75 @@ pub fn scanner_path(path: &str) -> bool {
         .any(|p| l.contains(p))
 }
 
+/// A risky action in the backend of a web application, recognised from method, path and query of a successful
+/// request: (rule, base severity, application, action)
+pub fn backend_action(r: &Req) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    let l = r.path.to_ascii_lowercase();
+    let q = r.query.to_ascii_lowercase();
+    let post = r.method == "POST";
+    let ok = (200..300).contains(&r.status);
+    let redirect = r.status == 302 || r.status == 303;
+    let qp = |k: &str| q.split('&').any(|kv| kv == k);
+    // WordPress (wp-admin answers a successful save with a redirect, the form with errors with 200)
+    if l.ends_with("/wp-admin/user-new.php") && post && redirect {
+        return Some(("web_admin_user_created", "high", "WordPress", "new user created"));
+    }
+    if (l.ends_with("/wp-json/wp/v2/users") || (l.ends_with("/index.php") || l == "/") && (q.contains("rest_route=/wp/v2/users") || q.contains("rest_route=%2fwp%2fv2%2fusers"))) && post && r.status == 201 {
+        return Some(("web_admin_user_created", "high", "WordPress", "new user created via the REST API"));
+    }
+    if l.ends_with("/wp-admin/update.php") && post && ok && (qp("action=upload-plugin") || qp("action=upload-theme")) {
+        return Some(("web_code_uploaded", "high", "WordPress", if qp("action=upload-plugin") { "plugin uploaded as ZIP" } else { "theme uploaded as ZIP" }));
+    }
+    if (l.ends_with("/wp-admin/plugin-editor.php") || l.ends_with("/wp-admin/theme-editor.php")) && post && (ok || redirect) {
+        return Some(("web_code_uploaded", "high", "WordPress", "code edited in the built-in file editor"));
+    }
+    if l.ends_with("/wp-admin/plugins.php") && redirect && qp("action=activate") {
+        return Some(("web_extension_enabled", "medium", "WordPress", "plugin activated"));
+    }
+    // Shopware 6 Admin API
+    if l.starts_with("/api/") || l.contains("/api/_action/") {
+        if post && (ok || r.status == 204) && l.ends_with("/_action/extension/upload") {
+            return Some(("web_code_uploaded", "high", "Shopware", "extension uploaded as ZIP"));
+        }
+        if post && (ok || r.status == 204) && (l.contains("/_action/extension/install/") || l.contains("/_action/extension/activate/")) {
+            return Some(("web_extension_enabled", "medium", "Shopware", "extension installed or activated"));
+        }
+        if post && (ok || r.status == 204) && (l.ends_with("/api/user") || l.ends_with("/api/acl-role")) {
+            return Some(("web_admin_user_created", "high", "Shopware", if l.ends_with("/user") { "new admin user created" } else { "new admin role created" }));
+        }
+        if post && (ok || r.status == 204) && l.ends_with("/api/integration") {
+            return Some(("web_admin_user_created", "high", "Shopware", "new API access (integration) created"));
+        }
+    }
+    // Magento 2 (admin path is individual: /<admin>/admin/user/save/…)
+    if post && (ok || redirect) {
+        if l.contains("/admin/user/save") {
+            return Some(("web_admin_user_created", "high", "Magento", "admin user saved"));
+        }
+        if l.contains("/admin/integration/save") {
+            return Some(("web_admin_user_created", "high", "Magento", "API integration saved"));
+        }
+        if l.contains("/theme/design_config/save") {
+            return Some(("web_skimmer_config", "high", "Magento", "design configuration saved (HTML head/footer – typical spot for card skimmers)"));
+        }
+        if l.contains("/admin/system_config/save/section/design") {
+            return Some(("web_skimmer_config", "high", "Magento", "design configuration saved (HTML head/footer – typical spot for card skimmers)"));
+        }
+    }
+    // Nextcloud
+    if (l.contains("/ocs/v1.php/cloud/users") || l.contains("/ocs/v2.php/cloud/users")) && post && ok {
+        return Some(if l.ends_with("/groups") || l.ends_with("/subadmins") {
+            ("web_admin_user_created", "medium", "Nextcloud", "user added to a group")
+        } else {
+            ("web_admin_user_created", "medium", "Nextcloud", "new user created")
+        });
+    }
+    if (l.ends_with("/settings/apps/enable") || l.contains("/ocs/v1.php/cloud/apps/") || l.contains("/ocs/v2.php/cloud/apps/")) && post && ok {
+        return Some(("web_extension_enabled", "medium", "Nextcloud", "app enabled"));
+    }
+    None
+}
+
 fn web_process(comm: &str) -> bool {
     comm.starts_with("php") || matches!(comm, "apache2" | "httpd" | "nginx" | "lsphp" | "frankenphp" | "www-data")
 }
@@ -274,7 +347,7 @@ impl Analyzer {
     pub const MAX_PER_MIN: u32 = 60;
 
     pub fn new(recent: Arc<RecentPhp>) -> Self {
-        Analyzer { recent, probes: HashMap::new(), probes_since: Instant::now(), handlers: apache_handlers(), fallback: HashMap::new(), redirects: HashMap::new(), roots: Vec::new(), sites: HashMap::new(), logins: tyrosd_source_auth::Aggregator::new(Duration::from_secs(300)), seen: HashMap::new(), budget: (Instant::now(), 0) }
+        Analyzer { recent, probes: HashMap::new(), probes_since: Instant::now(), handlers: apache_handlers(), fallback: HashMap::new(), redirects: HashMap::new(), fails: HashMap::new(), roots: Vec::new(), sites: HashMap::new(), logins: tyrosd_source_auth::Aggregator::new(Duration::from_secs(300)), seen: HashMap::new(), budget: (Instant::now(), 0) }
     }
 
     fn once(&mut self, key: &str) -> bool {
@@ -438,7 +511,11 @@ Decoy #{}", d.id), format!("decoy:{}", d.id))
         }
         if wp_login || xmlrpc {
             let generic = r.size > 0 && self.redirects.get(&site_key).is_some_and(|v| v.iter().any(|s| s.abs_diff(r.size) <= 64));
-            let success = wp_login && r.status == 302 && !generic;
+            // WordPress answers a successful login with a redirect without body; a 302 with a rendered page (shop or
+            // CMS redirecting every unknown address) is never a WordPress login – also right after an agent restart,
+            // before `redirects` has learned the site's redirect size (27.11.2026: scanner on a site without WordPress
+            // counted as successful login after the update)
+            let success = wp_login && r.status == 302 && !generic && r.size <= 512;
             let e = LoginEvent {
                 service: "wordpress".into(),
                 success,
@@ -452,8 +529,41 @@ Decoy #{}", d.id), format!("decoy:{}", d.id))
             if success || (wp_login && (r.status == 200 || r.status == 302)) || xmlrpc {
                 out.extend(self.logins.push(e).into_iter().map(Out::Login));
             }
+            if !success {
+                self.note_fail(&r.ip);
+            }
+        }
+        // 5. risky backend action (package C)
+        if let Some((rule, sev, app, what)) = backend_action(r) {
+            let fails = self.fails.get(&r.ip).filter(|(_, t)| t.elapsed() < Duration::from_secs(3600)).map(|(n, _)| *n).unwrap_or(0);
+            let site_name = if r.vhost.is_empty() { log.to_string() } else { r.vhost.clone() };
+            if self.once(&format!("backend|{rule}|{site_name}|{}|{what}", r.ip)) {
+                let after_bf = fails >= 5;
+                let mut d = format!("Application: {app}\nAction: {what}\nWebsite: {site_name}\nRequest: {} {}{} → {}\nFrom: {}", r.method, r.path,
+                    if r.query.is_empty() { String::new() } else { format!("?{}", r.query) }, r.status, r.ip);
+                if after_bf {
+                    d.push_str(&format!("\nThis IP had {fails} failed logins in the last hour – a successful break-in after brute force?"));
+                }
+                d.push_str(&format!("\nLog: {log}"));
+                out.push(Self::detection(rule, if after_bf { "critical" } else { sev }, &format!("{app}: {what}{}", if site.is_empty() { String::new() } else { site.clone() }), d,
+                    format!("{site_name}|{}|{what}", r.ip)));
+            }
         }
         out
+    }
+
+    fn note_fail(&mut self, ip: &str) {
+        if self.fails.len() >= 5000 {
+            self.fails.retain(|_, (_, t)| t.elapsed() < Duration::from_secs(3600));
+            if self.fails.len() >= 5000 {
+                return;
+            }
+        }
+        let e = self.fails.entry(ip.to_string()).or_insert((0, Instant::now()));
+        if e.1.elapsed() >= Duration::from_secs(3600) {
+            *e = (0, Instant::now());
+        }
+        e.0 += 1;
     }
 
     fn note_fallback(&mut self, r: &Req) {
@@ -941,6 +1051,12 @@ mod tests {
         b.feed(&w, "www_at_access.log");
         let l: Vec<_> = b.flush(true).into_iter().filter_map(|o| if let Out::Login(l) = o { Some(l) } else { None }).collect();
         assert!(!l.is_empty() && l.iter().all(|l| !l.success), "{l:?}");
+        // fresh analyzer (agent just restarted): a 302 with a rendered page is not a login either
+        let mut c = Analyzer::new(Arc::new(RecentPhp::default()));
+        let w = parse_line(r#"198.51.100.77 - - [27/Nov/2026:02:51:20 +0100] "POST /wp-login.php HTTP/2.0" 302 1383 "-" "x""#).unwrap();
+        c.feed(&w, "www_at_access.log");
+        let l: Vec<_> = c.flush(true).into_iter().filter_map(|o| if let Out::Login(l) = o { Some(l) } else { None }).collect();
+        assert!(!l.is_empty() && l.iter().all(|l| !l.success), "{l:?}");
         // GET on wp-login.php (form) does not count
         let get = parse_line(r#"203.0.113.9 - - [15/Nov/2026:10:00:00 +0100] "GET /wp-login.php HTTP/1.1" 200 4000 "-" "x""#).unwrap();
         assert!(a.feed(&get, "l").is_empty() && a.flush(true).is_empty());
@@ -1000,5 +1116,47 @@ mod tests {
         assert!(r2.find("/x.php").is_some());
         assert!(r2.find("/etc/x.php").is_none());
         let _ = std::fs::remove_file(f);
+    }
+
+    #[test]
+    fn backend_actions_per_application() {
+        let line = |m: &str, t: &str, st: u16| parse_line(&format!(r#"shop.example:443 203.0.113.9 - - [27/Nov/2026:10:00:00 +0100] "{m} {t} HTTP/1.1" {st} 0 "-" "x""#)).unwrap();
+        let a = |m: &str, t: &str, st: u16| backend_action(&line(m, t, st)).map(|x| (x.0, x.2));
+        assert_eq!(a("POST", "/wp-admin/user-new.php", 302), Some(("web_admin_user_created", "WordPress")));
+        assert_eq!(a("POST", "/wp-admin/user-new.php", 200), None, "form with errors");
+        assert_eq!(a("GET", "/wp-admin/user-new.php", 200), None);
+        assert_eq!(a("POST", "/wp-json/wp/v2/users", 201), Some(("web_admin_user_created", "WordPress")));
+        assert_eq!(a("POST", "/wp-json/wp/v2/users", 401), None);
+        assert_eq!(a("POST", "/wp-admin/update.php?action=upload-plugin", 200), Some(("web_code_uploaded", "WordPress")));
+        assert_eq!(a("POST", "/wp-admin/theme-editor.php", 200), Some(("web_code_uploaded", "WordPress")));
+        assert_eq!(a("GET", "/wp-admin/plugins.php?action=activate&plugin=x%2Fx.php&_wpnonce=1", 302), Some(("web_extension_enabled", "WordPress")));
+        assert_eq!(a("GET", "/wp-admin/plugins.php?action=deactivate&plugin=x", 302), None);
+        assert_eq!(a("POST", "/api/_action/extension/upload", 204), Some(("web_code_uploaded", "Shopware")));
+        assert_eq!(a("POST", "/api/_action/extension/activate/plugin/SwagPayPal", 204), Some(("web_extension_enabled", "Shopware")));
+        assert_eq!(a("POST", "/api/user", 204), Some(("web_admin_user_created", "Shopware")));
+        assert_eq!(a("POST", "/api/search/user", 200), None);
+        assert_eq!(a("POST", "/admin_x7k2/admin/user/save/key/abc/", 302), Some(("web_admin_user_created", "Magento")));
+        assert_eq!(a("POST", "/admin_x7k2/theme/design_config/save/key/abc/", 302), Some(("web_skimmer_config", "Magento")));
+        assert_eq!(a("POST", "/ocs/v2.php/cloud/users", 200), Some(("web_admin_user_created", "Nextcloud")));
+        assert_eq!(a("POST", "/ocs/v2.php/cloud/users/bob/groups", 200), Some(("web_admin_user_created", "Nextcloud")));
+        assert_eq!(a("POST", "/settings/apps/enable", 200), Some(("web_extension_enabled", "Nextcloud")));
+        assert_eq!(a("GET", "/settings/apps", 200), None);
+    }
+
+    #[test]
+    fn backend_action_after_brute_force_is_critical() {
+        let mut an = Analyzer::new(Arc::new(RecentPhp::default()));
+        let fail = parse_line(r#"shop.example:443 203.0.113.9 - - [27/Nov/2026:10:00:00 +0100] "POST /wp-login.php HTTP/1.1" 200 4000 "-" "x""#).unwrap();
+        let add = parse_line(r#"shop.example:443 203.0.113.9 - - [27/Nov/2026:10:05:00 +0100] "POST /wp-admin/user-new.php HTTP/1.1" 302 0 "-" "x""#).unwrap();
+        let other = parse_line(r#"shop.example:443 198.51.100.4 - - [27/Nov/2026:10:05:00 +0100] "POST /wp-admin/user-new.php HTTP/1.1" 302 0 "-" "x""#).unwrap();
+        for _ in 0..6 {
+            an.feed(&fail, "a.log");
+        }
+        let sev = |o: Vec<Out>| o.into_iter().find_map(|o| match o { Out::Detect(d) if d.rule == "web_admin_user_created" => Some((d.severity, d.title)), _ => None });
+        let (s1, t1) = sev(an.feed(&add, "a.log")).unwrap();
+        assert_eq!(s1, "critical");
+        assert_eq!(t1, "WordPress: new user created on shop.example");
+        assert_eq!(sev(an.feed(&other, "a.log")).unwrap().0, "high");
+        assert!(sev(an.feed(&other, "a.log")).is_none(), "once per hour");
     }
 }

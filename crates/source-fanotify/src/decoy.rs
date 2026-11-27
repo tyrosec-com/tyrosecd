@@ -42,6 +42,13 @@ impl DecoyWatch {
         Ok(DecoyWatch { fd, self_pid, perm: false })
     }
 
+    /// Plain notifications only (never a permission request) – for files that are read all the time
+    /// (e.g. /etc/shadow on every login), where no access may ever wait for the agent
+    pub fn notify_only() -> Result<DecoyWatch> {
+        let fd = fanotify_init(FAN_CLOEXEC | FAN_CLASS_NOTIF)?;
+        Ok(DecoyWatch { fd, self_pid: std::process::id() as i32, perm: false })
+    }
+
     pub fn permission_mode(&self) -> bool {
         self.perm
     }

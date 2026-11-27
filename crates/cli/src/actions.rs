@@ -24,7 +24,10 @@ use sha2::{Digest, Sha256};
 use tyrosd_core::state::{ActionRun, State};
 use tyrosd_proto as pb;
 
-pub const KINDS: [&str; 4] = ["restore", "quarantine", "block_ip", "decoy"];
+pub const KINDS: [&str; 5] = ["restore", "quarantine", "block_ip", "decoy", "harden"];
+/// Enabled by `tyrosecd actions enable` without a list – hardening changes configuration files and must be named
+/// explicitly (`tyrosecd actions enable harden`)
+pub const DEFAULT_KINDS: [&str; 4] = ["restore", "quarantine", "block_ip", "decoy"];
 const MAX_RESTORE: usize = 32 << 20;
 /// largest file that is copied into quarantine
 const MAX_QUARANTINE: u64 = 16 << 20;
@@ -83,7 +86,9 @@ pub fn dropin_content(kinds: &[String], paths: &[String]) -> Result<Option<Strin
     let quarantine = kinds.iter().any(|k| k == "quarantine");
     // Decoys: create new files in webroots – the same write permission as restore (webroots only)
     let decoy = kinds.iter().any(|k| k == "decoy");
-    if !restore && !quarantine && !decoy {
+    // Hardening: changes wp-config.php / .htaccess inside the webroots – same write permission (webroots only)
+    let harden = kinds.iter().any(|k| k == "harden");
+    if !restore && !quarantine && !decoy && !harden {
         return Ok(None);
     }
     let mut rw: Vec<String> = Vec::new();
@@ -357,6 +362,7 @@ fn needed(kind: &str) -> &str {
     match kind {
         "unblock_ip" => "block_ip",
         "decoy_place" | "decoy_remove" => "decoy",
+        "harden_apply" | "harden_undo" => "harden",
         k => k,
     }
 }
@@ -373,6 +379,8 @@ pub fn execute(a: &pb::Action, allowed: &[String], data_dir: &str, central_host:
         "unblock_ip" => unblock_ip(&a.ip, data_dir),
         "decoy_place" => crate::decoy::place(a, data_dir, &crate::decoy::webroots()),
         "decoy_remove" => crate::decoy::remove(a, data_dir),
+        "harden_apply" => crate::harden::apply(a, data_dir, &crate::decoy::webroots()),
+        "harden_undo" => crate::harden::undo(a, data_dir),
         k => Err(format!("unknown action {k}")),
     };
     match r {

@@ -23,10 +23,22 @@ const VENDOR_LIST: usize = 20;
 const VENDOR_GRACE_S: u64 = 3600;
 
 pub fn check(ctx: &mut Ctx, apps: &[App]) {
+    // PHP settings of the web PHP (only where PHP applications run)
+    if apps.iter().any(|a| !matches!(a.kind.as_str(), "Next.js" | "Nuxt")) && ctx.cfg.sysroot == "/" {
+        for (check, sev, title, path, detail) in crate::harden::php_ini() {
+            match check {
+                "php_display_errors" => ctx.add(sev, Category::Web, "php_display_errors", title, Some(path), Some(detail)),
+                "php_expose" => ctx.add(sev, Category::Web, "php_expose", title, Some(path), Some(detail)),
+                _ => ctx.add(sev, Category::Web, "php_exec_functions", title, Some(path), Some(detail)),
+            }
+        }
+    }
     ctx.stat("apps", apps.iter().map(|a| format!("{} {} {}", a.kind, a.version, a.root)).collect::<Vec<_>>());
     let mut done: HashSet<String> = HashSet::new();
+    // package E 5.1: hardening findings (read only, snippets in the detail)
+    let conf = if apps.is_empty() { String::new() } else { crate::harden::web_conf() };
     for a in apps {
-        for f in findings(a) {
+        for f in findings(a).into_iter().chain(crate::harden::findings(a, &conf)) {
             // WordPress and WooCommerce share root and configuration: report each file once
             if done.insert(format!("{}|{}", f.check, f.path)) {
                 ctx.add(f.severity, Category::Web, f.check, f.title, Some(f.path), Some(f.detail));
@@ -259,6 +271,10 @@ fn debug_mode(a: &App, root: &Path, out: &mut Vec<AppFinding>) {
 }
 
 /// wp-config.php in the root or (as WordPress allows) in the folder above it
+pub(crate) fn wp_config_path(root: &Path) -> Option<PathBuf> {
+    wp_config(root)
+}
+
 fn wp_config(root: &Path) -> Option<PathBuf> {
     let p = root.join("wp-config.php");
     if std::fs::metadata(&p).map(|m| m.is_file()).unwrap_or(false) {

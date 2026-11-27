@@ -17,6 +17,7 @@ pub fn check(ctx: &mut Ctx) {
     if ctx.cfg.sysroot == "/" {
         processes(ctx);
         ports(ctx);
+        crate::docker::check(ctx);
     }
 }
 
