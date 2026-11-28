@@ -18,6 +18,7 @@ pub mod dbconf;
 pub mod host;
 pub mod shop;
 pub mod software;
+pub mod unpackaged;
 
 #[derive(Serialize, Debug, Default)]
 pub struct Inventory {
@@ -425,7 +426,10 @@ pub fn collect_in(webroots: Vec<String>) -> Inventory {
     listeners.sort_by(|a, b| a.port.cmp(&b.port).then(a.proto.cmp(&b.proto)));
     let ports: Vec<u16> = listeners.iter().map(|l| l.port).collect();
     let (cts, ct_pkgs) = containers::detect();
-    let mut software = software::collect();
+    // WordPress/lockfiles also in the configured webroots and the application roots (composer.lock above public/)
+    let mut roots = search.clone();
+    roots.extend(apps.iter().map(|a| a.root.clone()));
+    let mut software = software::collect_with(&roots);
     software.packages.extend(ct_pkgs);
     Inventory {
         services: services(),

@@ -285,6 +285,17 @@ pub fn wordpress_in(fs: &FsRoot, webroots: &[String]) -> Vec<Package> {
     out
 }
 
+/// Default webroots plus the given roots, without nested duplicates
+pub fn search_roots(roots: &[String]) -> Vec<String> {
+    let mut v: Vec<String> = tyrosd_check::default_webroots("/");
+    v.extend(roots.iter().map(|r| r.trim_end_matches('/').to_string()).filter(|r| r.starts_with('/') && r.len() > 1));
+    v.sort();
+    v.dedup();
+    let copy = v.clone();
+    v.retain(|a| !copy.iter().any(|b| b != a && a.starts_with(&format!("{b}/"))));
+    v
+}
+
 /// composer.lock and package-lock.json (depth ≤ 4, without vendor/node_modules).
 pub fn lockfiles(webroots: &[String]) -> Vec<Package> {
     lockfiles_in(&FsRoot::host(""), webroots)
@@ -298,17 +309,25 @@ pub fn lockfiles_in(fs: &FsRoot, webroots: &[String]) -> Vec<Package> {
         fs.walk(w, 4, 1_000_000, &mut |p, k| {
             let name = p.rsplit('/').next().unwrap_or("");
             if k == Kind::Dir {
-                return !matches!(name, "vendor" | "node_modules" | ".git" | "cache" | "uploads");
+                // hidden folders (.git, .cargo, .cache, .npm …), dependency and build folders: not their own projects
+                return !name.starts_with('.') && !matches!(name, "vendor" | "node_modules" | "cache" | "uploads" | "target" | "site-packages" | "dist-packages");
             }
-            if name == "composer.lock" || name == "package-lock.json" {
+            if matches!(name, "composer.lock" | "package-lock.json" | "Gemfile.lock" | "Cargo.lock") {
                 found.push(p.to_string());
             }
             false
         });
         for p in found {
+            if p.ends_with("/Gemfile.lock") || p.ends_with("/Cargo.lock") {
+                if let Some(t) = fs.read(&p, 20 << 20).and_then(|d| String::from_utf8(d).ok()) {
+                    out.extend(if p.ends_with("/Gemfile.lock") { parse_gemfile_lock(&t, &p) } else { parse_cargo_lock(&t, &p) });
+                }
+                continue;
+            }
             let Some(v) = fs.read(&p, 20 << 20).and_then(|d| serde_json::from_slice::<serde_json::Value>(&d).ok()) else { continue };
             if p.ends_with("/composer.lock") {
-                for sec in ["packages", "packages-dev"] {
+                // development dependencies (packages-dev, "dev": true) do not run in production – left out (noise)
+                for sec in ["packages"] {
                     for pkg in v[sec].as_array().into_iter().flatten() {
                         if let (Some(n), Some(ver)) = (pkg["name"].as_str(), pkg["version"].as_str()) {
                             out.push(Package { ecosystem: "Packagist".into(), name: n.into(), version: ver.trim_start_matches('v').into(), source: "composer".into(), location: p.clone() });
@@ -318,6 +337,9 @@ pub fn lockfiles_in(fs: &FsRoot, webroots: &[String]) -> Vec<Package> {
             } else {
                 for (k, pkg) in v["packages"].as_object().into_iter().flatten() {
                     let Some(n) = k.rsplit("node_modules/").next().filter(|n| !n.is_empty() && k.contains("node_modules/")) else { continue };
+                    if pkg["dev"].as_bool() == Some(true) {
+                        continue;
+                    }
                     if let Some(ver) = pkg["version"].as_str() {
                         out.push(Package { ecosystem: "npm".into(), name: n.into(), version: ver.into(), source: "npm".into(), location: p.clone() });
                     }
@@ -328,6 +350,109 @@ pub fn lockfiles_in(fs: &FsRoot, webroots: &[String]) -> Vec<Package> {
     out.sort();
     out.dedup();
     out
+}
+
+/// Gemfile.lock: gems under `GEM` → `specs:` (four spaces + `name (version)`; platform suffixes removed)
+pub fn parse_gemfile_lock(t: &str, loc: &str) -> Vec<Package> {
+    let mut out = Vec::new();
+    let mut in_gem = false;
+    for l in t.lines() {
+        if !l.starts_with(' ') {
+            in_gem = l == "GEM";
+            continue;
+        }
+        if !in_gem || !l.starts_with("    ") || l.starts_with("     ") {
+            continue;
+        }
+        let Some((name, rest)) = l.trim().split_once(" (") else { continue };
+        let ver = rest.trim_end_matches(')').split('-').next().unwrap_or("").to_string();
+        if !name.is_empty() && ver.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            out.push(Package { ecosystem: "RubyGems".into(), name: name.into(), version: ver, source: "gemfile".into(), location: loc.into() });
+        }
+    }
+    out
+}
+
+/// Cargo.lock: `[[package]]` with `name` and `version`, only from crates.io (`source = "registry+…"`)
+pub fn parse_cargo_lock(t: &str, loc: &str) -> Vec<Package> {
+    let mut out = Vec::new();
+    for block in t.split("[[package]]").skip(1) {
+        let val = |k: &str| block.lines().find_map(|l| l.strip_prefix(&format!("{k} = \""))).map(|v| v.trim_end_matches('"').to_string());
+        if let (Some(n), Some(v), Some(src)) = (val("name"), val("version"), val("source")) {
+            if src.starts_with("registry+") {
+                out.push(Package { ecosystem: "crates.io".into(), name: n, version: v, source: "cargo".into(), location: loc.into() });
+            }
+        }
+    }
+    out
+}
+
+/// Python packages installed with pip (not from the distribution): `*.dist-info/METADATA` in /usr/local/lib/python3*
+/// and in virtual environments below /opt, /srv, /home, /root and the given roots
+pub fn python_packages(roots: &[String]) -> Vec<Package> {
+    let fs = FsRoot::host("");
+    let mut dirs: Vec<String> = Vec::new();
+    for base in ["/usr/local/lib", "/usr/local/lib64"] {
+        for (n, k) in fs.read_dir(base, 1000) {
+            if k == Kind::Dir && n.starts_with("python3") {
+                for sub in ["site-packages", "dist-packages"] {
+                    let d = format!("{base}/{n}/{sub}");
+                    if fs.is_dir(&d) {
+                        dirs.push(d);
+                    }
+                }
+            }
+        }
+    }
+    let mut tops: Vec<String> = ["/opt", "/srv", "/home", "/root"].iter().map(|s| s.to_string()).collect();
+    tops.extend(roots.iter().cloned());
+    for t in tops {
+        fs.walk(&t, 7, 300_000, &mut |p, k| {
+            if k != Kind::Dir {
+                return false;
+            }
+            let name = p.rsplit('/').next().unwrap_or("");
+            if name == "site-packages" || name == "dist-packages" {
+                dirs.push(p.to_string());
+                return false;
+            }
+            !matches!(name, "node_modules" | "vendor" | ".git" | ".cache" | "proc")
+        });
+    }
+    dirs.sort();
+    dirs.dedup();
+    let mut out = Vec::new();
+    for d in dirs.iter().take(200) {
+        for (n, k) in fs.read_dir(d, 20_000) {
+            if k != Kind::Dir || !(n.ends_with(".dist-info") || n.ends_with(".egg-info")) {
+                continue;
+            }
+            let meta = if n.ends_with(".dist-info") { format!("{d}/{n}/METADATA") } else { format!("{d}/{n}/PKG-INFO") };
+            let Some(t) = fs.read(&meta, 1 << 20).and_then(|b| String::from_utf8(b).ok()) else { continue };
+            let head = t.split("\n\n").next().unwrap_or("");
+            let field = |k: &str| head.lines().find_map(|l| l.strip_prefix(k)).map(|v| v.trim().to_string());
+            if let (Some(name), Some(ver)) = (field("Name:"), field("Version:")) {
+                out.push(Package { ecosystem: "PyPI".into(), name, version: ver, source: "pip".into(), location: d.clone() });
+            }
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// Top-level folders outside the webroots where applications and their lockfiles usually live
+pub fn app_dirs() -> Vec<String> {
+    let fs = FsRoot::host("");
+    let mut v = Vec::new();
+    for base in ["/opt", "/srv", "/home"] {
+        for (n, k) in fs.read_dir(base, 2000) {
+            if k == Kind::Dir && !n.starts_with('.') && n != "tyrosecd" {
+                v.push(format!("{base}/{n}"));
+            }
+        }
+    }
+    v
 }
 
 /// Packages under a root (host or test root), matching the package manager
@@ -348,7 +473,17 @@ pub fn packages_in(fs: &FsRoot, eco: &str) -> Vec<Package> {
     }
 }
 
+/// Upper bound of packages in the inventory (central server: 50 000 per list; room for container packages)
+pub const MAX_PACKAGES: usize = 40_000;
+
 pub fn collect() -> Software {
+    collect_with(&[])
+}
+
+/// Like `collect`, additionally searching WordPress and lockfiles in `roots` (webroots from the web server
+/// configuration and application roots – e.g. /users/www/app with composer.lock above its public/ folder).
+/// Nested roots are searched once.
+pub fn collect_with(roots: &[String]) -> Software {
     let (os_id, os_version) = os_release();
     let eco = ecosystem_of((os_id.clone(), os_version.clone()));
     let mut packages = if Path::new("/var/lib/dpkg/status").exists() {
@@ -358,9 +493,17 @@ pub fn collect() -> Software {
     } else {
         rpm_packages(&eco)
     };
-    let webroots = tyrosd_check::default_webroots("/");
+    // running programs without a package (self-compiled, nvm, snaps) – before the lockfiles, so the limit keeps them
+    packages.extend(crate::unpackaged::collect());
+    let webroots = search_roots(roots);
     packages.extend(wordpress(&webroots));
-    packages.extend(lockfiles(&webroots));
+    // lockfiles also in applications outside the webroots (/opt, /srv, /home) – package C of the CVE analysis
+    let mut lockroots = webroots.clone();
+    lockroots.extend(app_dirs());
+    packages.extend(lockfiles(&search_roots(&lockroots)));
+    packages.extend(python_packages(&webroots));
+    // the central server keeps at most 50 000 entries per list – system packages come first and are always kept
+    packages.truncate(MAX_PACKAGES);
     Software { os_ecosystem: eco, os_id, os_version, packages }
 }
 
@@ -462,5 +605,47 @@ Version: 1
         // only check the format (runs in the build container: Debian)
         let e = os_ecosystem();
         assert!(e.is_empty() || e.contains(':'), "{e}");
+    }
+
+    #[test]
+    fn search_roots_merge_and_dedup() {
+        let r = search_roots(&["/users/www/app".into(), "/users/www/app/public".into(), "/users/www/shop/".into(), "relative".into(), "/".into()]);
+        assert!(r.contains(&"/users/www/app".to_string()) && r.contains(&"/users/www/shop".to_string()));
+        assert!(!r.contains(&"/users/www/app/public".to_string()), "nested root searched once");
+        assert!(!r.iter().any(|x| x == "relative" || x == "/"));
+    }
+
+    #[test]
+    fn lockfile_above_public_is_found_via_app_root() {
+        let d = std::env::temp_dir().join(format!("tyrosd-lock-{}", std::process::id()));
+        std::fs::create_dir_all(d.join("app/public")).unwrap();
+        std::fs::write(d.join("app/composer.lock"), r#"{"packages":[{"name":"symfony/http-kernel","version":"v6.4.1"}]}"#).unwrap();
+        let root = d.join("app").to_string_lossy().into_owned();
+        assert!(lockfiles(&[format!("{root}/public")]).is_empty(), "webroot alone misses it");
+        let p = lockfiles(&search_roots(&[format!("{root}/public"), root.clone()]));
+        assert_eq!(p.iter().map(|x| (x.name.as_str(), x.version.as_str())).collect::<Vec<_>>(), vec![("symfony/http-kernel", "6.4.1")]);
+        let _ = std::fs::remove_dir_all(d);
+    }
+
+    #[test]
+    fn gemfile_and_cargo_locks() {
+        let g = "GIT\n  remote: x\n  specs:\n    mygem (0.1.0)\n\nGEM\n  remote: https://rubygems.org/\n  specs:\n    actionpack (7.1.3)\n      rack (>= 2.2.4)\n    nokogiri (1.16.2-x86_64-linux)\n    rack (3.0.9)\n\nPLATFORMS\n  x86_64-linux\n";
+        let p = parse_gemfile_lock(g, "/srv/app/Gemfile.lock");
+        assert_eq!(p.iter().map(|x| (x.name.as_str(), x.version.as_str())).collect::<Vec<_>>(), vec![("actionpack", "7.1.3"), ("nokogiri", "1.16.2"), ("rack", "3.0.9")]);
+        let c = "version = 3\n\n[[package]]\nname = \"serde\"\nversion = \"1.0.197\"\nsource = \"registry+https://github.com/rust-lang/crates.io-index\"\n\n[[package]]\nname = \"myapp\"\nversion = \"0.1.0\"\n";
+        let p = parse_cargo_lock(c, "/opt/x/Cargo.lock");
+        assert_eq!(p.len(), 1);
+        assert_eq!((p[0].name.as_str(), p[0].version.as_str(), p[0].ecosystem.as_str()), ("serde", "1.0.197", "crates.io"));
+    }
+
+    #[test]
+    fn python_metadata_in_venv() {
+        let d = std::env::temp_dir().join(format!("tyrosd-py-{}", std::process::id()));
+        let sp = d.join("venv/lib/python3.12/site-packages/Django-5.0.1.dist-info");
+        std::fs::create_dir_all(&sp).unwrap();
+        std::fs::write(sp.join("METADATA"), "Metadata-Version: 2.1\nName: Django\nVersion: 5.0.1\n\nLong description Name: fake\n").unwrap();
+        let p = python_packages(&[d.to_string_lossy().into_owned()]);
+        assert!(p.iter().any(|x| x.ecosystem == "PyPI" && x.name == "Django" && x.version == "5.0.1"), "{p:?}");
+        let _ = std::fs::remove_dir_all(d);
     }
 }

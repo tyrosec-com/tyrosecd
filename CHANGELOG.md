@@ -3,6 +3,20 @@
 Each version listed here corresponds exactly to the Git tag `v<version>` and to the signed binary under
 `https://get.tyrosec.com/releases/<version>/` (rebuild: [VERIFY.md](VERIFY.md)).
 
+## 0.7.1
+- Software inventory for vulnerability matching:
+  - WordPress and lockfiles are now also found in the webroots from the web server configuration and in the
+    application roots (e.g. `composer.lock` one level above `public/`). Before, only the default webroots were
+    searched, and the Composer/npm dependencies of applications under other paths were missing.
+  - Development dependencies (`packages-dev`, npm `"dev": true`) are left out. At most 40 000 entries are sent;
+    system packages always come first.
+  - Running programs that do not come from the package manager are reported with product and version, e.g.
+    self-compiled Apache/PHP/MySQL, Node.js via nvm, and snaps. The version is read from the string compiled into
+    the program, the install path or the snap metadata. The agent never executes these programs.
+  - Go programs report their Go version and modules from the build information in the binary.
+  - New sources: pip packages (in `/usr/local` and virtual environments), `Gemfile.lock`, `Cargo.lock`, and
+    lockfiles of applications in `/opt`, `/srv` and `/home`.
+
 ## 0.7.0
 - Privilege escalation: a process that ran as a normal user (e.g. the web server user) and becomes root without a
   regular SUID program (sudo, su …) is reported – both from the kernel's user change report (setuid & co.) and when
